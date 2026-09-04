@@ -1,10 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, UsageModelPriceOverride } from "@t3tools/contracts";
-import {
-  parseUsagePriceForm,
-  USAGE_PRICE_FIELDS,
-  usagePriceForm,
-} from "@t3tools/shared/usagePriceOverrides";
 import { useState } from "react";
 
 import { isElectron } from "../../env";
@@ -33,6 +28,7 @@ import {
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { parseUsagePriceForm, USAGE_PRICE_FIELDS, usagePriceForm } from "./usagePriceForm";
 
 export function UsagePriceOverrides({
   usage,

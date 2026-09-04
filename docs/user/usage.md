@@ -14,10 +14,10 @@ update model pricing.
 
 ## Set custom model prices
 
-Open **Usage → Model prices** to add, edit, or remove a model's estimated price. Choose the
-environment whose history you want to price, then enter the exact model ID and USD rates per
-million input and output tokens. You can enter any model ID, including models without public
-pricing.
+On web or desktop, open **Usage → Model prices** to add, edit, or remove a model's estimated
+price. Choose the environment whose history you want to price, then enter the exact model ID and
+USD rates per million input and output tokens. You can enter any model ID, including models
+without public pricing.
 
 Cache read and cache write rates are optional and use the input rate when blank. Enter `0` for
 tokens that are free. Saved prices replace automatic pricing for all of that environment's
