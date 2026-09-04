@@ -22,6 +22,7 @@ import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
 import { UsageLimitsSection } from "./UsageLimitsSection";
+import { UsagePriceOverridesSection } from "./UsagePriceOverridesSection";
 import type { UsageChartMetric } from "./usageChartData";
 import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
 
@@ -104,6 +105,8 @@ export function UsageRouteScreen() {
       ) : null}
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
+        automaticallyAdjustKeyboardInsets={Platform.OS === "ios"}
+        keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
         className="flex-1"
         contentContainerClassName="gap-6 px-5 pt-4"
@@ -145,6 +148,7 @@ export function UsageRouteScreen() {
             <ModelsSection merged={merged} />
           </>
         )}
+        <UsagePriceOverridesSection />
       </ScrollView>
     </View>
   );
