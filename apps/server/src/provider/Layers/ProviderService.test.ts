@@ -4100,12 +4100,18 @@ boundedListing.layer("ProviderServiceLive session listing", (it) => {
   );
 });
 
-describe("agent browser access", () => {
+describe("agent MCP access", () => {
   const revokedThreads: Array<ThreadId> = [];
 
-  const startSessionWith = (enableAgentBrowserAccess: boolean, threadId: ThreadId) =>
+  const startSessionWith = (
+    settings: {
+      readonly enableAgentBrowserAccess: boolean;
+      readonly enableCrossProviderAgentAccess: boolean;
+    },
+    threadId: ThreadId,
+  ) =>
     Effect.gen(function* () {
-      const issued: Array<ThreadId> = [];
+      const issued: Array<{ readonly threadId: ThreadId; readonly capabilities: string[] }> = [];
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -4120,14 +4126,17 @@ describe("agent browser access", () => {
       const providerLayer = makeProviderServiceLive({
         issueMcpCredential: (request) =>
           Effect.sync(() => {
-            issued.push(request.threadId);
+            issued.push({
+              threadId: request.threadId,
+              capabilities: [...request.capabilities].toSorted(),
+            });
             return undefined;
           }),
         revokeMcpCredential: (revoked) => Effect.sync(() => void revokedThreads.push(revoked)),
       }).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(ServerSettings.ServerSettingsService.layerTest({ enableAgentBrowserAccess })),
+        Layer.provide(ServerSettings.ServerSettingsService.layerTest(settings)),
         Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
@@ -4156,7 +4165,10 @@ describe("agent browser access", () => {
   // what actually denies every provider and external MCP client.
   it.effect("requests no MCP credential when agent browser access is off", () =>
     Effect.gen(function* () {
-      const issued = yield* startSessionWith(false, asThreadId("thread-browser-off"));
+      const issued = yield* startSessionWith(
+        { enableAgentBrowserAccess: false, enableCrossProviderAgentAccess: false },
+        asThreadId("thread-browser-off"),
+      );
 
       assert.deepEqual(issued, []);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -4167,7 +4179,10 @@ describe("agent browser access", () => {
       const threadId = asThreadId("thread-browser-revoke");
       revokedThreads.length = 0;
 
-      yield* startSessionWith(false, threadId);
+      yield* startSessionWith(
+        { enableAgentBrowserAccess: false, enableCrossProviderAgentAccess: false },
+        threadId,
+      );
 
       // Clearing the in-memory map is not enough: a token issued before the
       // toggle flipped stays valid against `/mcp` for its whole liveness
@@ -4180,9 +4195,38 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-browser-on");
 
-      const issued = yield* startSessionWith(true, threadId);
+      const issued = yield* startSessionWith(
+        { enableAgentBrowserAccess: true, enableCrossProviderAgentAccess: false },
+        threadId,
+      );
 
-      assert.deepEqual(issued, [threadId]);
+      assert.deepEqual(issued, [{ threadId, capabilities: ["preview"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("requests only child-agent capability when cross-provider access is on", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-cross-provider-on");
+
+      const issued = yield* startSessionWith(
+        { enableAgentBrowserAccess: false, enableCrossProviderAgentAccess: true },
+        threadId,
+      );
+
+      assert.deepEqual(issued, [{ threadId, capabilities: ["agents"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("combines independently enabled agent MCP capabilities", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-all-agent-mcp-on");
+
+      const issued = yield* startSessionWith(
+        { enableAgentBrowserAccess: true, enableCrossProviderAgentAccess: true },
+        threadId,
+      );
+
+      assert.deepEqual(issued, [{ threadId, capabilities: ["agents", "preview"] }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

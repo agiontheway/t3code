@@ -588,6 +588,47 @@ function AgentBrowserAccessSetting() {
   );
 }
 
+function CrossProviderAgentAccessSetting() {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("cross-provider-agent-access")}
+      description="Allow agents to start child threads on other configured providers. This may consume those providers' paid quota."
+      status={
+        settings.enableCrossProviderAgentAccess
+          ? "Applies to sessions started from now on."
+          : undefined
+      }
+      resetAction={
+        settings.enableCrossProviderAgentAccess !==
+        DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess ? (
+          <SettingResetButton
+            label="cross-provider agent access"
+            onClick={() =>
+              updateSettings({
+                enableCrossProviderAgentAccess:
+                  DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Switch
+          checked={settings.enableCrossProviderAgentAccess}
+          onCheckedChange={(checked) =>
+            updateSettings({ enableCrossProviderAgentAccess: Boolean(checked) })
+          }
+          aria-label="Allow cross-provider agent access"
+        />
+      }
+    />
+  );
+}
+
 function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled: boolean }) {
   const autoShow = useClientSettings((settings) => settings.browserAutoShowFloatingPreview);
   const updateSettings = useUpdatePrimarySettings();
@@ -1192,6 +1233,9 @@ export function IntegrationsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SettingsSection id="agents" title="Agents">
+        <CrossProviderAgentAccessSetting />
+      </SettingsSection>
       <SettingsSection id="browser" title="Browser">
         {/* Server-authoritative, so it stays editable on any client anchored to
             a server; `serverScoped` covers the hosted app, which has none. It

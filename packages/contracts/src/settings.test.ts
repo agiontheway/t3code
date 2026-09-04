@@ -403,6 +403,22 @@ describe("ServerSettings worktree defaults", () => {
   });
 });
 
+describe("ServerSettings agent MCP access", () => {
+  it("keeps cross-provider child agents opt-in", () => {
+    const settings = decodeServerSettings({});
+
+    expect(settings.enableAgentBrowserAccess).toBe(true);
+    expect(settings.enableCrossProviderAgentAccess).toBe(false);
+  });
+
+  it("accepts a cross-provider access patch", () => {
+    expect(
+      decodeServerSettingsPatch({ enableCrossProviderAgentAccess: true })
+        .enableCrossProviderAgentAccess,
+    ).toBe(true);
+  });
+});
+
 describe("ServerSettings.sourceControlWritingStyle", () => {
   it("defaults all style settings for legacy configs", () => {
     const settings = decodeServerSettings({});

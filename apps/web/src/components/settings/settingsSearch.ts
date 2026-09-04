@@ -347,6 +347,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["allow open drive preview tools sessions"],
   },
   {
+    id: "cross-provider-agent-access",
+    title: "Cross-provider agent access",
+    to: "/settings/integrations",
+    targetId: "agents",
+    searchTerms: ["allow child agents providers models quota MCP delegation"],
+  },
+  {
     id: "browser-profiles",
     title: "Browser profiles",
     to: "/settings/integrations",

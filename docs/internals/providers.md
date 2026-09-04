@@ -72,6 +72,21 @@ checkpoints but cannot roll back its conversation. The [checkpoint boundary](./o
 therefore rejects revert before touching files. Native permission and question option IDs must
 also survive normalization; a display label is not necessarily a valid reply.
 
+## Agent-initiated cross-provider children
+
+When **Cross-provider agent access** is enabled, a provider session receives the `agents` capability
+on its authenticated `t3-code` MCP connection. The tools in
+`apps/server/src/mcp/toolkits/agents/` create a real child thread with an explicit provider instance
+and model, then project its lifecycle back to the parent as the task activities consumed by the
+Agents UI. Routing never falls back to the parent provider, and the child inherits the parent's
+runtime mode.
+
+Follow-ups address the same child thread, so `ProviderService` resumes the provider session already
+bound to that thread. The parent/child handle is persisted in task lifecycle activities; reads filter
+those activity kinds explicitly so ownership survives the normal recent-activity window. The setting
+defaults off because a child can consume another configured provider's paid quota. Browser access is
+an independent MCP capability.
+
 ## Attachments and stored history
 
 Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)
