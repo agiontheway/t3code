@@ -17,6 +17,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProviderService from "../../../provider/Services/ProviderService.ts";
+import { ServerSettingsService } from "../../../serverSettings.ts";
 import { AgentToolkit, CrossProviderAgentError } from "./tools.ts";
 
 type Operation = "spawn" | "status" | "follow_up" | "interrupt";
@@ -47,6 +48,44 @@ const randomId = Effect.gen(function* () {
 });
 
 const nowIso = DateTime.now.pipe(Effect.map(DateTime.formatIso));
+
+const normalizeProviderAlias = (value: string): string => value.trim().toLocaleLowerCase();
+
+const resolveProviderInstance = Effect.fn("AgentToolkit.resolveProviderInstance")(function* (
+  requestedInstanceId: ProviderInstanceId,
+) {
+  const providers = yield* ProviderService.ProviderService;
+  const direct = yield* providers.getInstanceInfo(requestedInstanceId).pipe(Effect.option);
+  if (Option.isSome(direct)) {
+    return direct.value;
+  }
+
+  const settings = yield* ServerSettingsService;
+  const aliases = (yield* settings.getSettings.pipe(mapFailure("spawn"))).crossProviderAgentAliases;
+  const normalizedRequested = normalizeProviderAlias(requestedInstanceId);
+  const aliasEntry = Object.entries(aliases).find(
+    ([alias]) => normalizeProviderAlias(alias) === normalizedRequested,
+  );
+  if (!aliasEntry) {
+    const configuredAliases = Object.keys(aliases);
+    return yield* fail(
+      "spawn",
+      `Provider instance '${requestedInstanceId}' was not found and does not match a configured alias.${configuredAliases.length > 0 ? ` Available aliases: ${configuredAliases.join(", ")}.` : ""}`,
+    );
+  }
+
+  const resolvedInstanceId = aliasEntry[1];
+  return yield* providers
+    .getInstanceInfo(resolvedInstanceId)
+    .pipe(
+      Effect.mapError((error) =>
+        fail(
+          "spawn",
+          `Provider alias '${requestedInstanceId}' resolves to unavailable instance '${resolvedInstanceId}': ${errorText(error)}`,
+        ),
+      ),
+    );
+});
 
 const getParent = Effect.fn("AgentToolkit.getParent")(function* (operation: Operation) {
   const invocation = yield* McpInvocationContext.requireMcpCapability("agents").pipe(
@@ -266,19 +305,17 @@ const handlers = {
   agent_spawn: (input) =>
     Effect.gen(function* () {
       const { parent } = yield* getParent("spawn");
-      const providers = yield* ProviderService.ProviderService;
-      const provider = yield* providers
-        .getInstanceInfo(input.providerInstanceId)
-        .pipe(mapFailure("spawn"));
+      const provider = yield* resolveProviderInstance(input.providerInstanceId);
+      const providerInstanceId = provider.instanceId;
       if (!provider.enabled) {
-        return yield* fail("spawn", `Provider instance '${input.providerInstanceId}' is disabled.`);
+        return yield* fail("spawn", `Provider instance '${providerInstanceId}' is disabled.`);
       }
       const childThreadId = ThreadId.make(yield* randomId);
       const agentId = agentTaskId(childThreadId);
       const createdAt = yield* nowIso;
       const title = input.title ?? input.prompt.slice(0, 80).trim();
       const modelSelection: ModelSelection = {
-        instanceId: input.providerInstanceId,
+        instanceId: providerInstanceId,
         model: input.model,
         ...(input.options ? { options: input.options } : {}),
       };
@@ -312,7 +349,7 @@ const handlers = {
           title,
           ...(input.role ? { role: input.role } : {}),
           model: input.model,
-          providerInstanceId: input.providerInstanceId,
+          providerInstanceId,
           runHandles: { runId: childThreadId },
           timelineBypass: true,
         },
@@ -348,7 +385,7 @@ const handlers = {
                 agentKind: "agent",
                 title,
                 model: input.model,
-                providerInstanceId: input.providerInstanceId,
+                providerInstanceId,
                 runHandles: { runId: childThreadId },
                 timelineBypass: true,
                 status: "failed",
@@ -360,7 +397,7 @@ const handlers = {
       return {
         agentId,
         childThreadId,
-        providerInstanceId: input.providerInstanceId,
+        providerInstanceId,
         model: input.model,
       };
     }),

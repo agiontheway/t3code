@@ -11,6 +11,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProviderService from "../../../provider/Services/ProviderService.ts";
+import { ServerSettingsService } from "../../../serverSettings.ts";
 
 export class CrossProviderAgentError extends Schema.TaggedErrorClass<CrossProviderAgentError>()(
   "CrossProviderAgentError",
@@ -57,6 +58,7 @@ const dependencies = [
   ProjectionSnapshotQuery.ProjectionSnapshotQuery,
   OrchestrationEngine.OrchestrationEngineService,
   ProviderService.ProviderService,
+  ServerSettingsService,
   Crypto.Crypto,
 ];
 
@@ -66,7 +68,7 @@ export const AgentSpawnTool = Tool.make("agent_spawn", {
   parameters: Schema.Struct({
     providerInstanceId: ProviderInstanceId.annotate({
       description:
-        "Exact T3 provider instance id. Routing never falls back to the parent provider.",
+        "Exact T3 provider instance id or a case-insensitive alias configured under Integrations > Agents. Exact ids take precedence. The resolved route never falls back to the parent provider.",
     }),
     model: TrimmedNonEmptyString,
     options: Schema.optionalKey(Schema.NullOr(ProviderOptionSelections)),

@@ -841,6 +841,15 @@ export const ServerSettings = Schema.Struct({
   enableCrossProviderAgentAccess: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  /**
+   * Human-friendly names accepted by `agent_spawn` in place of an exact
+   * provider instance id. Exact configured ids always take precedence over
+   * aliases. Keys are matched case-insensitively by the server; values remain
+   * exact routing ids so a resolved dispatch never falls back.
+   */
+  crossProviderAgentAliases: Schema.Record(Schema.String, ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -1097,6 +1106,7 @@ export const ServerSettingsPatch = Schema.Struct({
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enableCrossProviderAgentAccess: Schema.optionalKey(Schema.Boolean),
+  crossProviderAgentAliases: Schema.optionalKey(Schema.Record(Schema.String, ProviderInstanceId)),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(

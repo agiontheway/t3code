@@ -9,12 +9,15 @@ import {
   type OrchestrationThread,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
+import { ProviderUnsupportedError } from "../../../provider/Errors.ts";
 import * as ProviderService from "../../../provider/Services/ProviderService.ts";
+import * as ServerSettings from "../../../serverSettings.ts";
 import { __testing } from "./handlers.ts";
 
 const parentProviderInstanceId = ProviderInstanceId.make("source-provider");
@@ -125,7 +128,73 @@ it.effect("routes a spawned child through the explicitly selected provider insta
     Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, snapshots),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, engine),
     Effect.provideService(ProviderService.ProviderService, providers),
-    Effect.provide(NodeServices.layer),
+    Effect.provide(Layer.mergeAll(ServerSettings.layerTest(), NodeServices.layer)),
+  );
+});
+
+it.effect("resolves a configured provider alias to its exact native instance", () => {
+  const commands: OrchestrationCommand[] = [];
+  const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: parentThreadId,
+    providerSessionId: "source-provider-session",
+    providerInstanceId: parentProviderInstanceId,
+    capabilities: new Set(["agents"]),
+    issuedAt: 1,
+  };
+  const snapshots = ProjectionSnapshotQuery.ProjectionSnapshotQuery.of({
+    getThreadDetailById: () => Effect.succeed(Option.some(parent)),
+  } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQueryShape);
+  const engine = OrchestrationEngine.OrchestrationEngineService.of({
+    dispatch: (command: OrchestrationCommand) =>
+      Effect.sync(() => {
+        commands.push(command);
+        return { sequence: commands.length };
+      }),
+  } as unknown as OrchestrationEngine.OrchestrationEngineShape);
+  const providers = ProviderService.ProviderService.of({
+    getInstanceInfo: (instanceId: ProviderInstanceId) =>
+      instanceId === claudeInstanceId
+        ? Effect.succeed({
+            instanceId,
+            driverKind: "claudeAgent",
+            displayName: "Claude",
+            enabled: true,
+            continuationIdentity: "claudeAgent",
+          })
+        : Effect.fail(new ProviderUnsupportedError({ provider: instanceId })),
+  } as unknown as ProviderService.ProviderServiceShape);
+
+  return Effect.gen(function* () {
+    const result = yield* __testing.handlers.agent_spawn({
+      providerInstanceId: ProviderInstanceId.make("CLAUDE"),
+      model: "claude-haiku-4-5",
+      prompt: "Inspect the repository.",
+    });
+
+    expect(result.providerInstanceId).toBe(claudeInstanceId);
+    expect(commands[0]).toMatchObject({
+      type: "thread.create",
+      modelSelection: { instanceId: claudeInstanceId, model: "claude-haiku-4-5" },
+    });
+    expect(commands[2]).toMatchObject({
+      type: "thread.turn.start",
+      modelSelection: { instanceId: claudeInstanceId, model: "claude-haiku-4-5" },
+    });
+  }).pipe(
+    Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+    Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, snapshots),
+    Effect.provideService(OrchestrationEngine.OrchestrationEngineService, engine),
+    Effect.provideService(ProviderService.ProviderService, providers),
+    Effect.provide(
+      Layer.mergeAll(
+        ServerSettings.layerTest({
+          crossProviderAgentAliases: { Claude: claudeInstanceId },
+        }),
+        NodeServices.layer,
+      ),
+    ),
   );
 });
 
@@ -176,7 +245,7 @@ it.effect("fails closed when the exact target provider instance is disabled", ()
     Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, snapshots),
     Effect.provideService(OrchestrationEngine.OrchestrationEngineService, engine),
     Effect.provideService(ProviderService.ProviderService, providers),
-    Effect.provide(NodeServices.layer),
+    Effect.provide(Layer.mergeAll(ServerSettings.layerTest(), NodeServices.layer)),
   );
 });
 

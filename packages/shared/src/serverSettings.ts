@@ -206,6 +206,9 @@ export function applyServerSettingsPatch(
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
       : {}),
+    ...(patch.crossProviderAgentAliases !== undefined
+      ? { crossProviderAgentAliases: patch.crossProviderAgentAliases }
+      : {}),
     ...(usageLimitSourcesPatch !== undefined
       ? {
           usageLimitSources: mergeUsageLimitSources(

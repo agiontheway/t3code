@@ -596,6 +596,9 @@ export function useSettingsRestore(onRestored?: () => void) {
       DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess
         ? ["Cross-provider agent access"]
         : []),
+      ...(Object.keys(settings.crossProviderAgentAliases).length > 0
+        ? ["Cross-provider agent aliases"]
+        : []),
     ],
     [
       isTextGenerationModelDirty,
@@ -609,6 +612,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.appearanceContrast,
       settings.enableAgentBrowserAccess,
       settings.enableCrossProviderAgentAccess,
+      settings.crossProviderAgentAliases,
       settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
@@ -763,6 +767,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       // rather than discovering it later.
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
       enableCrossProviderAgentAccess: DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess,
+      crossProviderAgentAliases: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentAliases,
     });
     onRestored?.();
   }, [

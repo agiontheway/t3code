@@ -87,6 +87,13 @@ those activity kinds explicitly so ownership survives the normal recent-activity
 defaults off because a child can consume another configured provider's paid quota. Browser access is
 an independent MCP capability.
 
+`agent_spawn` accepts either an exact provider instance id or a case-insensitive alias configured
+under **Integrations → Agents → Provider aliases**. Exact ids take precedence. Enabling access seeds
+aliases from enabled native providers; later provider changes add only missing defaults, preserving
+edited targets. Alias resolution persists the canonical instance id on the child, and missing,
+disabled, or deleted targets fail without falling back. The Admin accordion can restore the current
+auto-populated mapping.
+
 ## Attachments and stored history
 
 Attachments live outside the project workspace. [ProviderService](../../apps/server/src/provider/Layers/ProviderService.ts)

@@ -354,6 +354,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["allow child agents providers models quota MCP delegation"],
   },
   {
+    id: "cross-provider-agent-aliases",
+    title: "Cross-provider agent aliases",
+    to: "/settings/integrations",
+    targetId: "agents",
+    searchTerms: ["routing provider instance id OpenAI ChatGPT Claude Anthropic Cursor"],
+  },
+  {
     id: "browser-profiles",
     title: "Browser profiles",
     to: "/settings/integrations",

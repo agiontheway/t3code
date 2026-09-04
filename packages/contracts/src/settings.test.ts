@@ -409,6 +409,7 @@ describe("ServerSettings agent MCP access", () => {
 
     expect(settings.enableAgentBrowserAccess).toBe(true);
     expect(settings.enableCrossProviderAgentAccess).toBe(false);
+    expect(settings.crossProviderAgentAliases).toEqual({});
   });
 
   it("accepts a cross-provider access patch", () => {
@@ -416,6 +417,20 @@ describe("ServerSettings agent MCP access", () => {
       decodeServerSettingsPatch({ enableCrossProviderAgentAccess: true })
         .enableCrossProviderAgentAccess,
     ).toBe(true);
+  });
+
+  it("accepts exact provider targets in a cross-provider alias patch", () => {
+    const patch = decodeServerSettingsPatch({
+      crossProviderAgentAliases: {
+        Claude: "claudeAgent",
+        Anthropic: "claudeAgent",
+      },
+    });
+
+    expect(patch.crossProviderAgentAliases).toEqual({
+      Claude: ProviderInstanceId.make("claudeAgent"),
+      Anthropic: ProviderInstanceId.make("claudeAgent"),
+    });
   });
 });
 

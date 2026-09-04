@@ -299,6 +299,24 @@ describe("serverSettings helpers", () => {
     });
   });
 
+  it("replaces cross-provider alias maps so restored defaults can remove edits", () => {
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      crossProviderAgentAliases: {
+        Claude: ProviderInstanceId.make("claude_custom"),
+        Temporary: ProviderInstanceId.make("codex"),
+      },
+    };
+
+    expect(
+      applyServerSettingsPatch(current, {
+        crossProviderAgentAliases: {
+          Claude: ProviderInstanceId.make("claudeAgent"),
+        },
+      }).crossProviderAgentAliases,
+    ).toEqual({ Claude: ProviderInstanceId.make("claudeAgent") });
+  });
+
   it("upserts and removes usageLimitSources per entry so concurrent edits cannot clobber", () => {
     const hubA = UsageLimitSourceId.make("cliproxy-a");
     const hubB = UsageLimitSourceId.make("cliproxy-b");
