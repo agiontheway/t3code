@@ -181,7 +181,7 @@ function EnvironmentModelPrices({
       });
       if (result._tag === "Failure") {
         setError("Could not save model prices. Try again.");
-      } else {
+      } else if (price !== null || editingModel === model) {
         reset();
       }
     } finally {
