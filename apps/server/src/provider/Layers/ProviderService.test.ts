@@ -4102,10 +4102,16 @@ boundedListing.layer("ProviderServiceLive session listing", (it) => {
 
 describe("agent browser access", () => {
   const revokedThreads: Array<ThreadId> = [];
+  const issuedCapabilities: Array<ReadonlySet<string> | undefined> = [];
 
-  const startSessionWith = (enableAgentBrowserAccess: boolean, threadId: ThreadId) =>
+  const startSessionWith = (
+    enableAgentBrowserAccess: boolean,
+    threadId: ThreadId,
+    enableCrossProviderAgentAccess = false,
+  ) =>
     Effect.gen(function* () {
       const issued: Array<ThreadId> = [];
+      issuedCapabilities.length = 0;
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
         ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -4121,13 +4127,19 @@ describe("agent browser access", () => {
         issueMcpCredential: (request) =>
           Effect.sync(() => {
             issued.push(request.threadId);
+            issuedCapabilities.push(request.capabilities);
             return undefined;
           }),
         revokeMcpCredential: (revoked) => Effect.sync(() => void revokedThreads.push(revoked)),
       }).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(ServerSettings.ServerSettingsService.layerTest({ enableAgentBrowserAccess })),
+        Layer.provide(
+          ServerSettings.ServerSettingsService.layerTest({
+            enableAgentBrowserAccess,
+            enableCrossProviderAgentAccess,
+          }),
+        ),
         Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
@@ -4183,6 +4195,17 @@ describe("agent browser access", () => {
       const issued = yield* startSessionWith(true, threadId);
 
       assert.deepEqual(issued, [threadId]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("issues only the cross-provider capability when browser access is off", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-cross-provider-agents-on");
+
+      const issued = yield* startSessionWith(false, threadId, true);
+
+      assert.deepEqual(issued, [threadId]);
+      assert.deepEqual([...issuedCapabilities[0]!], ["agents"]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

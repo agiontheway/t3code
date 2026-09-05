@@ -341,6 +341,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     providerSettingsOnly: true,
   },
   {
+    id: "cross-provider-agent-access",
+    title: "Cross-provider agent access",
+    to: "/settings/integrations",
+    searchTerms: ["agents child threads subscriptions orchestration provider aliases"],
+  },
+  {
     id: "agent-browser-access",
     title: "Agent browser access",
     to: "/settings/integrations",

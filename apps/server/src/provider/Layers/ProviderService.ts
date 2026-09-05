@@ -66,6 +66,7 @@ import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import type { McpCapability } from "../../mcp/McpInvocationContext.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
@@ -89,7 +90,7 @@ export interface ProviderServiceLiveOptions {
   /**
    * Overrides MCP credential issuance. The real issuer reads a module-global
    * registry that only a running MCP server installs, which makes the
-   * agent-browser-access gate unobservable from a unit test; this seam lets a
+   * agent-MCP capability gates unobservable from a unit test; this seam lets a
    * test see whether a credential was requested at all.
    */
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
@@ -691,10 +692,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   /**
    * Attach the `t3-code` MCP server to the session that is about to start.
    *
-   * This is the only place a credential is minted, so withholding one here is
-   * what disables agent browser access everywhere: every adapter already
-   * treats a missing session as "no MCP server", and the `/mcp` endpoint
-   * accepts nothing but tokens issued from this path.
+   * This is the only place a credential is minted. Every adapter treats a
+   * missing session as "no MCP server", while the credential's capability set
+   * authorizes the browser and cross-provider toolkits independently.
    */
   /**
    * Deny on an unreadable settings file rather than letting the read failure
@@ -704,19 +704,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
    * "off" silently becoming "on" would violate the user's stated choice,
    * whereas the reverse costs an agent one toolset and is visible immediately.
    */
-  const agentBrowserAccessEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.enableAgentBrowserAccess),
+  const enabledAgentMcpCapabilities = serverSettings.getSettings.pipe(
+    Effect.map((settings) => {
+      const capabilities = new Set<McpCapability>();
+      if (settings.enableAgentBrowserAccess) capabilities.add("preview");
+      if (settings.enableCrossProviderAgentAccess) capabilities.add("agents");
+      return capabilities;
+    }),
     Effect.catch((cause) =>
       Effect.logWarning(
-        "Could not read server settings; withholding agent browser access for this session.",
+        "Could not read server settings; withholding agent MCP access for this session.",
         { cause },
-      ).pipe(Effect.as(false)),
+      ).pipe(Effect.as(new Set<McpCapability>())),
     ),
   );
 
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     Effect.gen(function* () {
-      if (!(yield* agentBrowserAccessEnabled)) {
+      const capabilities = yield* enabledAgentMcpCapabilities;
+      if (capabilities.size === 0) {
         // Revoke as well as clear. Every other prepare path reaches
         // `issueActiveMcpCredential`, which revokes the thread first, so
         // skipping it here would leave a previously issued bearer token valid
@@ -727,7 +733,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId));
         return undefined;
       }
-      const credential = yield* issueMcpCredential({ threadId, providerInstanceId });
+      const credential = yield* issueMcpCredential({ threadId, providerInstanceId, capabilities });
       if (credential) {
         yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
       }

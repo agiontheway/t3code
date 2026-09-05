@@ -106,9 +106,19 @@ const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
-type TurnStartRequestedDomainEvent = Extract<
+interface CrossProviderAgentLink {
+  readonly taskId: string;
+  readonly parentThreadId: ThreadId;
+  readonly childThreadId: ThreadId;
+  readonly title: string;
+  readonly role?: string;
+  readonly model: string;
+  readonly providerInstanceId: string;
+}
+
+type RuntimeIngestionDomainEvent = Extract<
   OrchestrationEvent,
-  { type: "thread.turn-start-requested" }
+  { type: "thread.turn-start-requested" | "thread.session-set" }
 >;
 
 type RuntimeIngestionInput =
@@ -118,7 +128,7 @@ type RuntimeIngestionInput =
     }
   | {
       source: "domain";
-      event: TurnStartRequestedDomainEvent;
+      event: RuntimeIngestionDomainEvent;
     };
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
@@ -1016,6 +1026,221 @@ const make = Effect.gen(function* () {
     return yield* projectionSnapshotQuery
       .getThreadDetailById(threadId, { activityKinds })
       .pipe(Effect.map(Option.getOrUndefined));
+  });
+
+  // The link is immutable and persisted as a hidden child activity. Cache both
+  // hits and misses so ordinary threads pay at most one focused lookup per
+  // server process; linked threads recover naturally after restart.
+  const crossProviderLinkByChild = new Map<ThreadId, CrossProviderAgentLink | null>();
+  const resolveCrossProviderLink = Effect.fn("resolveCrossProviderLink")(function* (
+    childThreadId: ThreadId,
+  ) {
+    if (crossProviderLinkByChild.has(childThreadId)) {
+      return crossProviderLinkByChild.get(childThreadId) ?? undefined;
+    }
+    const detail = yield* resolveThreadDetail(childThreadId, ["t3.agent.linked"]);
+    const activity = detail?.activities.findLast(
+      (candidate) => candidate.kind === "t3.agent.linked",
+    );
+    const payload =
+      activity && typeof activity.payload === "object" && activity.payload !== null
+        ? (activity.payload as Record<string, unknown>)
+        : undefined;
+    const link =
+      typeof payload?.taskId === "string" &&
+      typeof payload.parentThreadId === "string" &&
+      typeof payload.childThreadId === "string" &&
+      typeof payload.title === "string" &&
+      typeof payload.model === "string" &&
+      typeof payload.providerInstanceId === "string"
+        ? {
+            taskId: payload.taskId,
+            parentThreadId: ThreadId.make(payload.parentThreadId),
+            childThreadId: ThreadId.make(payload.childThreadId),
+            title: payload.title,
+            ...(typeof payload.role === "string" ? { role: payload.role } : {}),
+            model: payload.model,
+            providerInstanceId: payload.providerInstanceId,
+          }
+        : null;
+    crossProviderLinkByChild.set(childThreadId, link);
+    return link ?? undefined;
+  });
+
+  const bridgeCrossProviderAgentEvent = Effect.fn("bridgeCrossProviderAgentEvent")(function* (
+    event: ProviderRuntimeEvent,
+  ) {
+    const link = yield* resolveCrossProviderLink(event.threadId);
+    if (!link) return;
+
+    const base = {
+      taskId: link.taskId,
+      taskType: "t3_cross_provider_agent",
+      agentKind: "agent",
+      title: link.title,
+      ...(link.role ? { role: link.role } : {}),
+      model: link.model,
+      providerInstanceId: link.providerInstanceId,
+      runHandles: { runId: link.childThreadId },
+      timelineBypass: true,
+    };
+    let kind: "task.progress" | "task.updated" | undefined;
+    let summary: string | undefined;
+    let payload: Record<string, unknown> | undefined;
+
+    switch (event.type) {
+      case "turn.started":
+        kind = "task.updated";
+        summary = "Cross-provider agent running";
+        payload = { ...base, status: "running" };
+        break;
+      case "request.opened":
+      case "user-input.requested":
+        kind = "task.updated";
+        summary = "Cross-provider agent waiting";
+        payload = { ...base, status: "waiting" };
+        break;
+      case "request.resolved":
+      case "user-input.resolved":
+        kind = "task.updated";
+        summary = "Cross-provider agent resumed";
+        payload = { ...base, status: "running" };
+        break;
+      case "thread.token-usage.updated": {
+        const usage = event.payload.usage;
+        kind = "task.progress";
+        summary = "Cross-provider agent usage updated";
+        payload = {
+          ...base,
+          usageSnapshot: true,
+          typedUsage: {
+            totalTokens: usage.totalProcessedTokens ?? usage.usedTokens,
+            ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+            ...(usage.cachedInputTokens !== undefined
+              ? { cachedInputTokens: usage.cachedInputTokens }
+              : {}),
+            ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+            ...(usage.reasoningOutputTokens !== undefined
+              ? { reasoningOutputTokens: usage.reasoningOutputTokens }
+              : {}),
+            ...(usage.toolUses !== undefined ? { toolUses: usage.toolUses } : {}),
+            ...(usage.durationMs !== undefined ? { durationMs: usage.durationMs } : {}),
+          },
+        };
+        break;
+      }
+      case "item.started":
+      case "item.updated":
+      case "item.completed":
+        if (isToolLifecycleItemType(event.payload.itemType)) {
+          kind = "task.progress";
+          summary = event.payload.title ?? "Cross-provider agent used a tool";
+          payload = {
+            ...base,
+            summary,
+            ...(event.payload.title ? { lastToolName: event.payload.title } : {}),
+          };
+        }
+        break;
+      case "turn.completed": {
+        const failed = normalizeRuntimeTurnState(event.payload.state) === "failed";
+        if (failed) return;
+        const child = yield* resolveThreadDetail(link.childThreadId);
+        const output = child?.messages
+          .toReversed()
+          .find((message) => message.role === "assistant" && !message.streaming)?.text;
+        kind = "task.updated";
+        summary = "Cross-provider agent idle";
+        payload = {
+          ...base,
+          status: "idle",
+          ...(output ? { summary: output.slice(0, 4_000), detail: output.slice(0, 4_000) } : {}),
+          ...(event.payload.errorMessage ? { error: event.payload.errorMessage } : {}),
+        };
+        break;
+      }
+      case "turn.aborted":
+      case "runtime.error":
+        // Their thread.session-set domain event is the canonical terminal
+        // bridge, including server-startup orphan reconciliation.
+        return;
+      default:
+        return;
+    }
+
+    if (!kind || !summary || !payload) return;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: yield* providerCommandId(event, "cross-provider-parent-activity"),
+      threadId: link.parentThreadId,
+      activity: {
+        id: EventId.make(`cross-provider:${event.eventId}:${link.taskId}`),
+        tone: payload.status === "failed" ? "error" : "info",
+        kind,
+        summary,
+        payload,
+        turnId: null,
+        createdAt: event.createdAt,
+      },
+      createdAt: event.createdAt,
+    });
+    threadBackgroundLiveness.recordTaskLiveness({
+      threadId: link.parentThreadId,
+      taskId: link.taskId,
+      taskType: "t3_cross_provider_agent",
+      status: typeof payload.status === "string" ? payload.status : undefined,
+      kind: kind === "task.progress" ? "progress" : "updated",
+    });
+  });
+
+  // Startup reconciliation and other server-owned failures do not originate
+  // as provider runtime events. Mirror terminal session errors as well so a
+  // linked Agent row cannot remain Working after its child process is gone.
+  const bridgeCrossProviderSessionEvent = Effect.fn("bridgeCrossProviderSessionEvent")(function* (
+    event: Extract<OrchestrationEvent, { type: "thread.session-set" }>,
+  ) {
+    const status = event.payload.session.status;
+    if (status !== "error" && status !== "interrupted") return;
+    const link = yield* resolveCrossProviderLink(event.payload.threadId);
+    if (!link) return;
+    const activityStatus = status === "error" ? "failed" : "interrupted";
+    const payload = {
+      taskId: link.taskId,
+      taskType: "t3_cross_provider_agent",
+      agentKind: "agent",
+      title: link.title,
+      ...(link.role ? { role: link.role } : {}),
+      model: link.model,
+      providerInstanceId: link.providerInstanceId,
+      runHandles: { runId: link.childThreadId },
+      timelineBypass: true,
+      status: activityStatus,
+      ...(event.payload.session.lastError ? { error: event.payload.session.lastError } : {}),
+    };
+    const uuid = yield* crypto.randomUUIDv4;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`cross-provider-session:${event.eventId}:${uuid}`),
+      threadId: link.parentThreadId,
+      activity: {
+        id: EventId.make(`cross-provider-session:${event.eventId}:${link.taskId}`),
+        tone: status === "error" ? "error" : "info",
+        kind: "task.updated",
+        summary:
+          status === "error" ? "Cross-provider agent failed" : "Cross-provider agent interrupted",
+        payload,
+        turnId: null,
+        createdAt: event.occurredAt,
+      },
+      createdAt: event.occurredAt,
+    });
+    threadBackgroundLiveness.recordTaskLiveness({
+      threadId: link.parentThreadId,
+      taskId: link.taskId,
+      taskType: "t3_cross_provider_agent",
+      status: activityStatus,
+      kind: "updated",
+    });
   });
 
   const resolveThreadRuntimeContext = Effect.fn("resolveThreadRuntimeContext")(function* (
@@ -2173,9 +2398,11 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+      yield* bridgeCrossProviderAgentEvent(event);
     });
 
-  const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+  const processDomainEvent = (event: RuntimeIngestionDomainEvent) =>
+    event.type === "thread.session-set" ? bridgeCrossProviderSessionEvent(event) : Effect.void;
 
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
@@ -2206,7 +2433,7 @@ const make = Effect.gen(function* () {
       );
       yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
-          if (event.type !== "thread.turn-start-requested") {
+          if (event.type !== "thread.turn-start-requested" && event.type !== "thread.session-set") {
             return Effect.void;
           }
           return worker.enqueue({ source: "domain", event });

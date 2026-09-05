@@ -9,6 +9,21 @@ A driver kind identifies an integration; an instance identifies one configuratio
 lifecycle. Route work by instance, so two accounts using the same driver do not share mutable
 session or catalog state.
 
+## Cross-provider child agents
+
+A provider-native child inherits its parent's runtime and account; T3 cannot redirect that native
+spawn after the provider has executed it. Cross-provider dispatch therefore enters through the
+T3 MCP boundary, but the child is still an ordinary orchestration thread routed by an exact
+`ProviderInstanceId`. The MCP handler owns no agent status machine: it persists an immutable
+parent-child link, starts the normal thread turn, and can wait once on domain events for the result.
+
+`ProviderRuntimeIngestion` remains authoritative for child lifecycle, progress, and usage. For a
+linked child it reprojects those canonical events into the parent's existing `task.*` activity
+shape, so the shared Agents fold handles native and cross-provider rows alike. A settled turn is
+`idle`, not completed, because follow-up reuses the same child thread and provider resume identity.
+Routing validates the selected instance and advertised model and fails closed; it never falls back
+to the parent's provider.
+
 ## Process and account isolation
 
 T3-managed OpenCode chat uses one server per thread. Its MCP registrations are directory-scoped, while

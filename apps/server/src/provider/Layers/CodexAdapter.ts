@@ -2244,6 +2244,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                 ],
               }
             : {}),
+          crossProviderAgentsAvailable: mcpSession?.capabilities.has("agents") ?? false,
         };
         const turnTokenUsage = makeCodexTurnTokenUsageState();
         const sessionScope = yield* Scope.make("sequential");
