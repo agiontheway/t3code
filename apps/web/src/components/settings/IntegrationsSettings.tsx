@@ -6,12 +6,14 @@
  *
  * @module IntegrationsSettings
  */
+import { useAtomValue } from "@effect/atom-react";
 import {
   BrowserImportFailureReason,
   BROWSER_PROFILE_MAX_COUNT,
   type BrowserLinkTarget,
   type BrowserProfile,
   type EnvironmentId,
+  ProviderInstanceId,
   BROWSER_PROFILE_NAME_MAX_LENGTH,
   BROWSER_RECORDING_FRAME_RATES,
   DEFAULT_BROWSER_AUTO_SHOW_FLOATING_PREVIEW,
@@ -35,14 +37,15 @@ import {
   type PreviewViewportSetting,
 } from "@t3tools/contracts";
 import { PREVIEW_VIEWPORT_PRESETS } from "@t3tools/shared/previewViewport";
-import { InfoIcon, MoreVertical, Plus as PlusIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { ChevronRightIcon, InfoIcon, MoreVertical, Plus as PlusIcon } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ScreenRotationIcon } from "~/browser/ScreenRotationIcon";
 import { resolveEnvironmentOptionLabel } from "~/components/BranchToolbar.logic";
 import { previewBridge } from "~/components/preview/previewBridge";
 import { cn, randomUUID } from "~/lib/utils";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
+import { primaryServerProvidersAtom } from "~/state/server";
 import { isElectron } from "../../env";
 
 import { Badge } from "../ui/badge";
@@ -78,6 +81,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import { Switch } from "../ui/switch";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   getClientSettings,
@@ -97,6 +101,10 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
 import type { ImportOutcome } from "./browserImportWizard.logic";
+import {
+  deriveDefaultCrossProviderAgentAliases,
+  mergeMissingCrossProviderAgentAliases,
+} from "./crossProviderAgentAliases";
 
 const FILL_VALUE = "fill";
 const RESPONSIVE_VALUE = "responsive";
@@ -585,6 +593,156 @@ function AgentBrowserAccessSetting() {
         />
       }
     />
+  );
+}
+
+function CrossProviderAgentAccessSetting() {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const providers = useAtomValue(primaryServerProvidersAtom);
+  const [aliasesOpen, setAliasesOpen] = useState(false);
+  const defaultAliases = useMemo(
+    () => deriveDefaultCrossProviderAgentAliases(providers),
+    [providers],
+  );
+  const aliases = settings.crossProviderAgentAliases;
+
+  useEffect(() => {
+    if (!settings.enableCrossProviderAgentAccess) return;
+    const merged = mergeMissingCrossProviderAgentAliases(aliases, defaultAliases);
+    const entries = Object.entries(aliases);
+    if (
+      entries.length === Object.keys(merged).length &&
+      entries.every(([alias, target]) => merged[alias] === target)
+    ) {
+      return;
+    }
+    updateSettings({ crossProviderAgentAliases: merged });
+  }, [aliases, defaultAliases, settings.enableCrossProviderAgentAccess, updateSettings]);
+
+  return (
+    <>
+      <SettingsRow
+        serverScoped
+        {...searchableSetting("cross-provider-agent-access")}
+        description="Allow agents to start ordinary T3 child threads on other configured provider subscriptions. This may consume those providers' paid quota."
+        status={
+          settings.enableCrossProviderAgentAccess
+            ? "Applies to sessions started from now on."
+            : undefined
+        }
+        resetAction={
+          settings.enableCrossProviderAgentAccess !==
+          DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess ? (
+            <SettingResetButton
+              label="cross-provider agent access"
+              onClick={() =>
+                updateSettings({
+                  enableCrossProviderAgentAccess:
+                    DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.enableCrossProviderAgentAccess}
+            onCheckedChange={(checked) => {
+              const enabled = Boolean(checked);
+              updateSettings({
+                enableCrossProviderAgentAccess: enabled,
+                ...(enabled
+                  ? {
+                      crossProviderAgentAliases: mergeMissingCrossProviderAgentAliases(
+                        aliases,
+                        defaultAliases,
+                      ),
+                    }
+                  : {}),
+              });
+            }}
+            aria-label="Allow cross-provider agent access"
+          />
+        }
+      />
+      {settings.enableCrossProviderAgentAccess ? (
+        <Collapsible open={aliasesOpen} onOpenChange={setAliasesOpen}>
+          <CollapsibleTrigger className="group flex min-h-10 w-full items-center gap-2 px-3 text-left sm:px-4">
+            <ChevronRightIcon className="size-4 text-muted-foreground transition-transform duration-200 group-data-panel-open:rotate-90" />
+            <span className="text-sm text-foreground">Provider aliases</span>
+            <span className="text-xs text-muted-foreground">{Object.keys(aliases).length}</span>
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <div className="space-y-3 border-t border-border/50 px-3 py-3 sm:px-4">
+              <div className="flex items-start justify-between gap-4">
+                <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+                  Friendly names exposed by agent_catalog. Exact provider instance IDs always take
+                  precedence.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => updateSettings({ crossProviderAgentAliases: defaultAliases })}
+                >
+                  Restore defaults
+                </Button>
+              </div>
+              {Object.entries(aliases).length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No enabled providers have default aliases.
+                </p>
+              ) : (
+                <div className="overflow-hidden rounded-lg border border-border/60">
+                  {Object.entries(aliases).map(([alias, target], index) => (
+                    <div
+                      key={alias}
+                      className={cn(
+                        "flex items-center gap-3 px-3 py-2",
+                        index > 0 && "border-t border-border/60",
+                      )}
+                    >
+                      <span className="min-w-28 flex-1 text-sm text-foreground">{alias}</span>
+                      <Select
+                        value={target}
+                        onValueChange={(value) => {
+                          if (!value) return;
+                          updateSettings({
+                            crossProviderAgentAliases: {
+                              ...aliases,
+                              [alias]: ProviderInstanceId.make(value),
+                            },
+                          });
+                        }}
+                      >
+                        <SelectTrigger
+                          size="sm"
+                          className="w-56 max-w-full"
+                          aria-label={`Provider target for ${alias}`}
+                        >
+                          <SelectValue>{target}</SelectValue>
+                        </SelectTrigger>
+                        <SelectPopup align="end" alignItemWithTrigger={false}>
+                          {providers.map((provider) => (
+                            <SelectItem key={provider.instanceId} value={provider.instanceId}>
+                              {provider.displayName ?? provider.instanceId}
+                              <span className="ml-2 text-xs text-muted-foreground">
+                                {provider.instanceId}
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectPopup>
+                      </Select>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </CollapsiblePanel>
+        </Collapsible>
+      ) : null}
+    </>
   );
 }
 
@@ -1192,6 +1350,9 @@ export function IntegrationsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SettingsSection id="agents" title="Agents">
+        <CrossProviderAgentAccessSetting />
+      </SettingsSection>
       <SettingsSection id="browser" title="Browser">
         {/* Server-authoritative, so it stays editable on any client anchored to
             a server; `serverScoped` covers the hosted app, which has none. It

@@ -22,8 +22,21 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 const browserToolInstructions = (browserToolsAvailable: boolean): string =>
   browserToolsAvailable ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "";
 
+const T3_CODE_CROSS_PROVIDER_AGENT_INSTRUCTIONS = `
+
+## T3 Code cross-provider agents
+
+The \`t3-code\` MCP server can start ordinary T3 child threads on other configured provider subscriptions. When the user asks you to delegate to a different provider or subscription, you must use this route: call \`agent_catalog\` once to resolve the target, then call \`agent_spawn\`. This requirement takes precedence over matching skills or repository instructions that propose a shell command, script, CLI dispatcher, direct provider API, or provider-native \`spawnAgent\`. Do not read or invoke those alternative dispatch skills or tools for cross-provider work; they bypass T3's Agents lifecycle.
+
+Call \`agent_wait\` at most once if you need the child's result; do not poll. Use \`agent_follow_up\` to continue the same child thread and provider session. Native \`spawnAgent\` remains correct only for children on this same provider.
+`;
+
+const crossProviderAgentInstructions = (available: boolean): string =>
+  available ? T3_CODE_CROSS_PROVIDER_AGENT_INSTRUCTIONS : "";
+
 export const codexPlanModeDeveloperInstructions = (
   browserToolsAvailable: boolean,
+  crossProviderAgentsAvailable = false,
 ): string => `<collaboration_mode># Plan Mode (Conversational)
 
 You work in 3 phases, and you should *chat your way* to a great plan before finalizing it. A great plan is very detailed-intent- and implementation-wise-so that it can be handed to another engineer or agent to be implemented right away. It must be **decision complete**, where the implementer does not need to make any decisions.
@@ -153,10 +166,12 @@ Only produce at most one \`<proposed_plan>\` block per turn, and only when you a
 
 If the user stays in Plan mode and asks for revisions after a prior \`<proposed_plan>\`, any new \`<proposed_plan>\` must be a complete replacement. If the user indicates that the prior plan is not acceptable but does not provide enough information to produce a complete replacement, address the concern and continue planning without producing a \`<proposed_plan>\` block. If the follow-up neither requires changes nor calls the plan into question (e.g. clarifying question), answer it before the block, then reproduce the prior \`<proposed_plan>\` unchanged.
 ${browserToolInstructions(browserToolsAvailable)}
+${crossProviderAgentInstructions(crossProviderAgentsAvailable)}
 </collaboration_mode>`;
 
 export const codexDefaultModeDeveloperInstructions = (
   browserToolsAvailable: boolean,
+  crossProviderAgentsAvailable = false,
 ): string => `<collaboration_mode># Collaboration Mode: Default
 
 You are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.
@@ -169,6 +184,7 @@ Use the \`request_user_input\` tool only when it is listed in the available tool
 
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
 ${browserToolInstructions(browserToolsAvailable)}
+${crossProviderAgentInstructions(crossProviderAgentsAvailable)}
 </collaboration_mode>`;
 
 export interface CodexRuntimeInfo {
@@ -185,11 +201,12 @@ export function buildCodexDeveloperInstructions(
    * setting, so the prompt cannot claim tools the turn doesn't have.
    */
   browserToolsAvailable = true,
+  crossProviderAgentsAvailable = false,
 ): string {
   const base =
     interactionMode === "plan"
-      ? codexPlanModeDeveloperInstructions(browserToolsAvailable)
-      : codexDefaultModeDeveloperInstructions(browserToolsAvailable);
+      ? codexPlanModeDeveloperInstructions(browserToolsAvailable, crossProviderAgentsAvailable)
+      : codexDefaultModeDeveloperInstructions(browserToolsAvailable, crossProviderAgentsAvailable);
   return `${base}
 
 ${buildRuntimeInstructions({ harness: "Codex", ...runtime })}`;

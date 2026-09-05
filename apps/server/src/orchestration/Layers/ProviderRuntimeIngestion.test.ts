@@ -410,6 +410,139 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("turn failed");
   });
 
+  it("automatically bridges linked child lifecycle and usage into the parent Agents task", async () => {
+    const harness = await createHarness();
+    const childThreadId = asThreadId("thread-cross-provider-child");
+    const taskId = `t3-agent:${childThreadId}`;
+    const createdAt = "2026-01-01T00:00:01.000Z";
+    await harness.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("cmd-cross-provider-child-create"),
+      threadId: childThreadId,
+      projectId: asProjectId("project-1"),
+      title: "Claude child",
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-haiku-4-5",
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      branch: null,
+      worktreePath: null,
+      createdAt,
+    });
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-cross-provider-link"),
+      threadId: childThreadId,
+      activity: {
+        id: asEventId("activity-cross-provider-link"),
+        tone: "info",
+        kind: "t3.agent.linked",
+        summary: "Linked cross-provider child",
+        payload: {
+          taskId,
+          parentThreadId: "thread-1",
+          childThreadId,
+          title: "Claude child",
+          role: "researcher",
+          model: "claude-haiku-4-5",
+          providerInstanceId: "claudeAgent",
+        },
+        turnId: null,
+        createdAt,
+      },
+      createdAt,
+    });
+    await harness.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("cmd-cross-provider-parent-start"),
+      threadId: asThreadId("thread-1"),
+      activity: {
+        id: asEventId("activity-cross-provider-parent-start"),
+        tone: "info",
+        kind: "task.started",
+        summary: "Cross-provider agent started",
+        payload: { taskId, agentKind: "agent", title: "Claude child" },
+        turnId: null,
+        createdAt,
+      },
+      createdAt,
+    });
+
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId("evt-cross-provider-turn-started"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        threadId: childThreadId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+        turnId: asTurnId("cross-provider-turn-1"),
+        payload: {},
+      },
+      {
+        type: "thread.token-usage.updated",
+        eventId: asEventId("evt-cross-provider-usage"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        threadId: childThreadId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        turnId: asTurnId("cross-provider-turn-1"),
+        payload: {
+          usage: {
+            usedTokens: 800,
+            totalProcessedTokens: 1_200,
+            inputTokens: 1_000,
+            cachedInputTokens: 700,
+            outputTokens: 200,
+          },
+        },
+      },
+      {
+        type: "turn.completed",
+        eventId: asEventId("evt-cross-provider-turn-completed"),
+        provider: ProviderDriverKind.make("claudeAgent"),
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        threadId: childThreadId,
+        createdAt: "2026-01-01T00:00:04.000Z",
+        turnId: asTurnId("cross-provider-turn-1"),
+        payload: { state: "completed" },
+      },
+    ]);
+
+    const parent = (await harness.readModel()).threads.find((thread) => thread.id === "thread-1");
+    const linkedActivities = parent?.activities.filter(
+      (activity) =>
+        typeof activity.payload === "object" &&
+        activity.payload !== null &&
+        (activity.payload as Record<string, unknown>).taskId === taskId,
+    );
+    expect(
+      linkedActivities?.some(
+        (activity) =>
+          activity.kind === "task.updated" &&
+          (activity.payload as Record<string, unknown>).status === "running",
+      ),
+    ).toBe(true);
+    expect(
+      linkedActivities?.some(
+        (activity) =>
+          activity.kind === "task.progress" &&
+          (activity.payload as Record<string, unknown>).typedUsage &&
+          ((activity.payload as Record<string, unknown>).typedUsage as Record<string, unknown>)
+            .totalTokens === 1_200,
+      ),
+    ).toBe(true);
+    expect(
+      linkedActivities?.some(
+        (activity) =>
+          activity.kind === "task.updated" &&
+          (activity.payload as Record<string, unknown>).status === "idle",
+      ),
+    ).toBe(true);
+  });
+
   it.each([
     { delivery: "buffered", enableLegacyTokenStreaming: false },
     { delivery: "streamed", enableLegacyTokenStreaming: true },

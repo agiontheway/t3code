@@ -54,6 +54,20 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
+it.effect("preserves the exact capability set on issued credentials", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-agents-only"),
+      providerInstanceId: ProviderInstanceId.make("openrouter-glm"),
+      capabilities: new Set(["agents"]),
+    });
+    expect([...issued.config.capabilities]).toEqual(["agents"]);
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect([...(yield* registry.resolve(token))!.capabilities]).toEqual(["agents"]);
+  }),
+);
+
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
     const cases = [

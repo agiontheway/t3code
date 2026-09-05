@@ -36,3 +36,20 @@ it.effect("reports the scoped credential context when preview capability is unav
     expect(error.message).toBe("MCP credential does not grant the preview capability.");
   });
 });
+
+it.effect("denies cross-provider agent tools without the agents capability", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-1"),
+    providerSessionId: "provider-session-1",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    capabilities: new Set(["preview"]),
+    issuedAt: 1,
+  };
+
+  return Effect.gen(function* () {
+    const error = yield* McpInvocationContext.requireMcpCapability("agents").pipe(Effect.flip);
+    expect(error).toBeInstanceOf(McpInvocationContext.McpCapabilityUnavailableError);
+    expect(error).toMatchObject({ capability: "agents" });
+  }).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, invocation));
+});

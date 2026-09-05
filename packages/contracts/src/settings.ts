@@ -847,6 +847,14 @@ export const ServerSettings = Schema.Struct({
    * between a desktop window and a phone attached to the same server.
    */
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Allow provider sessions to create child threads on other configured instances. */
+  enableCrossProviderAgentAccess: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  /** Case-insensitive model-facing aliases whose values are exact routing ids. */
+  crossProviderAgentAliases: Schema.Record(Schema.String, ProviderInstanceId).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -1106,6 +1114,8 @@ export const ServerSettingsPatch = Schema.Struct({
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
+  enableCrossProviderAgentAccess: Schema.optionalKey(Schema.Boolean),
+  crossProviderAgentAliases: Schema.optionalKey(Schema.Record(Schema.String, ProviderInstanceId)),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
