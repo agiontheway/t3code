@@ -1,0 +1,192 @@
+/**
+ * Contract proof for Codex app-server dynamic tools: the REAL
+ * CodexSessionRuntime against the scripted mock peer must (1) send the
+ * granted tool specs as `dynamicTools` on `thread/start` through the raw
+ * request path and (2) answer the peer's `item/tool/call` server request
+ * with a `DynamicToolCallResponse` carrying the host's output.
+ */
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { it } from "@effect/vitest";
+import { ThreadId } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import { assert, describe } from "vite-plus/test";
+
+import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
+import {
+  clearCrossProviderAgentToolHost,
+  setCrossProviderAgentToolHost,
+  type CrossProviderToolSpec,
+} from "../CrossProviderAgentToolHost.ts";
+import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
+
+const ROOT = wireFixture.rootThreadId;
+const THREAD_ID = ThreadId.make("thread-xp-dynamic-tools");
+const CATALOG_SPEC: CrossProviderToolSpec = {
+  name: "agent_catalog",
+  description: "List eligible cross-provider routes.",
+  inputSchema: { type: "object", properties: {}, additionalProperties: false },
+};
+
+const decodeJsonLines = Schema.decodeUnknownSync(
+  Schema.Array(Schema.fromJsonString(Schema.Unknown)),
+);
+const readJsonLines = (path: string) =>
+  decodeJsonLines(
+    NodeFS.readFileSync(path, "utf8")
+      .trim()
+      .split("\n")
+      .filter((line) => line.length > 0),
+  );
+
+const scriptPath = NodePath.join(import.meta.dirname, "../testFixtures/.dynamic-tools-script.json");
+const peerPath = NodePath.join(
+  import.meta.dirname,
+  `../testFixtures/codexCollabMockPeer.${HostProcessPlatform.defaultValue() === "win32" ? "cmd" : "sh"}`,
+);
+
+describe("CodexSessionRuntime dynamic tools integration", () => {
+  it.effect("sends dynamicTools on thread/start and answers item/tool/call", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ threadId: ThreadId; tool: string; args: unknown }> = [];
+      setCrossProviderAgentToolHost({
+        toolsForThread: (threadId) =>
+          Effect.succeed(threadId === THREAD_ID ? Option.some([CATALOG_SPEC]) : Option.none()),
+        call: (threadId, tool, args) =>
+          Effect.sync(() => {
+            calls.push({ threadId, tool, args });
+            return { output: { routes: [], callerDepth: 0 }, isError: false };
+          }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+
+      const script = {
+        rootThreadId: ROOT,
+        recordThreadStart: true,
+        holdTurnOpen: true,
+        completeTurnOnServerResponse: true,
+        notifications: [],
+        serverRequests: [
+          {
+            id: 4101,
+            method: "item/tool/call",
+            params: {
+              threadId: ROOT,
+              turnId: wireFixture.responses.turnStart.turn.id,
+              callId: "call-xp-1",
+              tool: "agent_catalog",
+              arguments: {},
+            },
+          },
+        ],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      for (const suffix of [".requests", ".responses"]) {
+        NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+      }
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const suffix of ["", ".requests", ".responses"]) {
+            NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+          }
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: THREAD_ID,
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const turnCompleted = yield* runtime.events.pipe(
+        Stream.filter((event) => event.method === "turn/completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "list the routes" });
+      yield* Fiber.join(turnCompleted);
+      // Sidecars are read before `close`, which tears down the test scope.
+      const recordedRequests = readJsonLines(`${scriptPath}.requests`);
+      const recordedResponses = readJsonLines(`${scriptPath}.responses`);
+      yield* runtime.close;
+
+      assert.deepEqual(calls, [{ threadId: THREAD_ID, tool: "agent_catalog", args: {} }]);
+
+      const threadStart = recordedRequests.find(
+        (entry) => (entry as { method: string }).method === "thread/start",
+      ) as { params: Record<string, unknown> } | undefined;
+      assert.isDefined(threadStart);
+      assert.deepEqual(threadStart.params.dynamicTools, [
+        {
+          type: "function",
+          name: CATALOG_SPEC.name,
+          description: CATALOG_SPEC.description,
+          inputSchema: CATALOG_SPEC.inputSchema,
+        },
+      ]);
+
+      assert.deepEqual(recordedResponses, [
+        {
+          id: 4101,
+          result: {
+            contentItems: [{ type: "inputText", text: '{"routes":[],"callerDepth":0}' }],
+            success: true,
+          },
+        },
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("starts without dynamicTools when the host grants nothing", () =>
+    Effect.gen(function* () {
+      setCrossProviderAgentToolHost({
+        toolsForThread: () => Effect.succeedNone,
+        call: () => Effect.succeed({ output: {}, isError: false }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+
+      const script = { rootThreadId: ROOT, recordThreadStart: true, notifications: [] };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      NodeFS.rmSync(`${scriptPath}.requests`, { force: true });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const suffix of ["", ".requests"]) {
+            NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+          }
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: THREAD_ID,
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      yield* runtime.start();
+      const recordedRequests = readJsonLines(`${scriptPath}.requests`);
+      yield* runtime.close;
+
+      const threadStart = recordedRequests.find(
+        (entry) => (entry as { method: string }).method === "thread/start",
+      ) as { params: Record<string, unknown> } | undefined;
+      assert.isDefined(threadStart);
+      assert.notProperty(threadStart.params, "dynamicTools");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});

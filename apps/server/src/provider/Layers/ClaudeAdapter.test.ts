@@ -11,9 +11,12 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -29,6 +32,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -37,7 +41,12 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  clearCrossProviderAgentToolHost,
+  setCrossProviderAgentToolHost,
+} from "../CrossProviderAgentToolHost.ts";
 import {
   SYNTHETIC_CLAUDE_CAPABLE_MODEL,
   SYNTHETIC_CLAUDE_COLLIDING_ALIAS,
@@ -6695,6 +6704,159 @@ describe("ClaudeAdapterLive", () => {
         true,
       );
     }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
+
+describe("ClaudeAdapterLive cross-provider in-process tools", () => {
+  const CATALOG_SPEC = {
+    name: "agent_catalog",
+    description: "List eligible cross-provider routes.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  } as const;
+
+  it.effect("injects an in-process t3 server whose tool handler reaches the host", () => {
+    const harness = makeHarness();
+    const calls: Array<{ threadId: ThreadId; tool: string; args: unknown }> = [];
+    setCrossProviderAgentToolHost({
+      toolsForThread: (threadId) =>
+        Effect.succeed(threadId === THREAD_ID ? Option.some([CATALOG_SPEC]) : Option.none()),
+      call: (threadId, tool, args) =>
+        Effect.sync(() => {
+          calls.push({ threadId, tool, args });
+          return { output: { routes: [], callerDepth: 0 }, isError: false };
+        }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const mcpServers = harness.getLastCreateQueryInput()?.options.mcpServers;
+      assert.isDefined(mcpServers);
+      assert.deepEqual(Object.keys(mcpServers), ["t3"]);
+      const server = mcpServers.t3;
+      assert.isDefined(server);
+      assert.equal(server.type, "sdk");
+      if (server.type !== "sdk" || !("instance" in server)) {
+        assert.fail("expected an in-process sdk server");
+      }
+
+      // Drive the SDK's McpServer the way the Claude process would, over an
+      // in-memory MCP transport, so the proof covers the real tool wiring.
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      yield* Effect.promise(() => server.instance.connect(serverTransport));
+      const client = new McpClient({ name: "t3-test", version: "0.0.0" });
+      yield* Effect.promise(() => client.connect(clientTransport));
+      yield* Effect.addFinalizer(() => Effect.promise(() => client.close()));
+
+      const tools = yield* Effect.promise(() => client.listTools());
+      assert.deepEqual(
+        tools.tools.map((entry) => entry.name),
+        ["agent_catalog"],
+      );
+      assert.equal(tools.tools[0]?.description, CATALOG_SPEC.description);
+
+      const result = yield* Effect.promise(() =>
+        client.callTool({ name: "agent_catalog", arguments: {} }),
+      );
+      assert.deepEqual(result.content, [{ type: "text", text: '{"routes":[],"callerDepth":0}' }]);
+      assert.notEqual(result.isError, true);
+      assert.deepEqual(calls, [{ threadId: THREAD_ID, tool: "agent_catalog", args: {} }]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("marks host errors on the tool result and keeps the browser MCP server", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+      call: () =>
+        Effect.succeed({
+          output: { error: { code: "access_disabled", message: "Access is off." } },
+          isError: true,
+        }),
+    });
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("env-1"),
+      threadId: THREAD_ID,
+      providerSessionId: "session-1",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      endpoint: "http://127.0.0.1:1/mcp",
+      authorizationHeader: "Bearer test-token",
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          clearCrossProviderAgentToolHost();
+          McpProviderSession.clearMcpProviderSession(THREAD_ID);
+        }),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const mcpServers = harness.getLastCreateQueryInput()?.options.mcpServers;
+      assert.isDefined(mcpServers);
+      assert.deepEqual(Object.keys(mcpServers).sort(), ["t3", "t3-code"]);
+      assert.equal(mcpServers["t3-code"]?.type, "http");
+      const server = mcpServers.t3;
+      if (server?.type !== "sdk" || !("instance" in server)) {
+        assert.fail("expected an in-process sdk server");
+      }
+
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      yield* Effect.promise(() => server.instance.connect(serverTransport));
+      const client = new McpClient({ name: "t3-test", version: "0.0.0" });
+      yield* Effect.promise(() => client.connect(clientTransport));
+      yield* Effect.addFinalizer(() => Effect.promise(() => client.close()));
+
+      const result = yield* Effect.promise(() =>
+        client.callTool({ name: "agent_catalog", arguments: {} }),
+      );
+      assert.equal(result.isError, true);
+      assert.deepEqual(result.content, [
+        {
+          type: "text",
+          text: '{"error":{"code":"access_disabled","message":"Access is off."}}',
+        },
+      ]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("omits mcpServers entirely when no host grants tools", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeedNone,
+      call: () => Effect.succeed({ output: {}, isError: false }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      assert.isUndefined(harness.getLastCreateQueryInput()?.options.mcpServers);
+    }).pipe(
+      Effect.scoped,
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );

@@ -25,10 +25,12 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import * as CodexClient from "effect-codex-app-server/client";
@@ -40,7 +42,26 @@ import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import {
+  encodeCrossProviderToolOutput,
+  readCrossProviderAgentToolHost,
+  type CrossProviderToolSpec,
+} from "../CrossProviderAgentToolHost.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+
+/** Parallel dynamic tool calls a single session may have in flight. */
+const DYNAMIC_TOOL_CALL_CONCURRENCY = 16;
+
+export function toCodexDynamicToolSpec(
+  spec: CrossProviderToolSpec,
+): EffectCodexSchema.ClientRequest__DynamicToolSpec {
+  return {
+    type: "function",
+    name: spec.name,
+    description: spec.description,
+    inputSchema: spec.inputSchema,
+  };
+}
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -687,7 +708,27 @@ interface CodexThreadOpenClient {
     method: M,
     payload: CodexRpc.ClientRequestParamsByMethod[M],
   ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
+  readonly raw: {
+    readonly request: (
+      method: string,
+      payload?: unknown,
+    ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  };
 }
+
+/**
+ * `thread/start` accepts `dynamicTools`, but Codex marks the field
+ * experimental so the generated `V2ThreadStartParams` omits it. Widened
+ * locally and sent through the raw request path, which does not strip
+ * unknown keys; the generated schema is never edited.
+ */
+type CodexThreadStartParamsWithDynamicTools = EffectCodexSchema.V2ThreadStartParams & {
+  readonly dynamicTools: ReadonlyArray<EffectCodexSchema.ClientRequest__DynamicToolSpec>;
+};
+
+const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
+  EffectCodexSchema.V2ThreadStartResponse,
+);
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -697,6 +738,8 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  /** Granted only on `thread/start`; a resumed Codex thread never carries tools. */
+  readonly dynamicTools?: ReadonlyArray<EffectCodexSchema.ClientRequest__DynamicToolSpec>;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -705,9 +748,35 @@ export const openCodexThread = (input: {
     model: input.requestedModel,
     serviceTier: input.serviceTier,
   });
+  const dynamicTools = input.dynamicTools;
+  // Suspended so the start request is only issued when actually taken (fresh
+  // start, or the fallback after a recoverable resume failure).
+  const startThread: Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> =
+    Effect.suspend(() =>
+      dynamicTools !== undefined && dynamicTools.length > 0
+        ? input.client.raw
+            .request("thread/start", {
+              ...startParams,
+              dynamicTools,
+            } satisfies CodexThreadStartParamsWithDynamicTools)
+            .pipe(
+              Effect.flatMap((raw) =>
+                decodeV2ThreadStartResponse(raw).pipe(
+                  Effect.mapError((error) =>
+                    CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                      "decode-response-payload",
+                      error,
+                      { method: "thread/start" },
+                    ),
+                  ),
+                ),
+              ),
+            )
+        : input.client.request("thread/start", startParams),
+    );
 
   if (resumeThreadId === undefined) {
-    return input.client.request("thread/start", startParams);
+    return startThread;
   }
 
   return input.client
@@ -723,7 +792,7 @@ export const openCodexThread = (input: {
           resumeThreadId,
           recoverable: true,
           cause: error,
-        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
+        }).pipe(Effect.andThen(startThread)),
       ),
     );
 };
@@ -1916,6 +1985,48 @@ export const makeCodexSessionRuntime = (
       ),
     );
 
+    // Dynamic (cross-provider agent) tool calls. The host call is the awaited
+    // work itself, so no Deferred correlation is needed: the response is
+    // whatever the host returns, and the turn continues once it is sent.
+    const dynamicToolCallSemaphore = yield* Semaphore.make(DYNAMIC_TOOL_CALL_CONCURRENCY);
+    yield* client.handleServerRequest("item/tool/call", (payload) =>
+      dynamicToolCallSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({
+            "codex.dynamic_tool.call_id": payload.callId,
+            "codex.dynamic_tool.tool": payload.tool,
+          });
+          const host = readCrossProviderAgentToolHost();
+          const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+          if (!host || payload.threadId !== providerThreadId) {
+            // Only the session's own thread was granted tools; a call from a
+            // native collab child (or with no host at all) fails closed.
+            return {
+              contentItems: [
+                {
+                  type: "inputText",
+                  text: encodeCrossProviderToolOutput({
+                    error: {
+                      code: "unsupported_caller",
+                      message: "This thread was not granted cross-provider agent tools.",
+                    },
+                  }),
+                },
+              ],
+              success: false,
+            } satisfies EffectCodexSchema.DynamicToolCallResponse;
+          }
+          const result = yield* host.call(options.threadId, payload.tool, payload.arguments);
+          return {
+            contentItems: [
+              { type: "inputText", text: encodeCrossProviderToolOutput(result.output) },
+            ],
+            success: !result.isError,
+          } satisfies EffectCodexSchema.DynamicToolCallResponse;
+        }),
+      ),
+    );
+
     yield* client.handleServerRequest("item/commandExecution/requestApproval", (payload) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4("command-approval-request"));
@@ -2235,6 +2346,10 @@ export const makeCodexSessionRuntime = (
       yield* client.notify("initialized", undefined);
 
       const requestedModel = normalizeCodexModelSlug(options.model);
+      const crossProviderToolHost = readCrossProviderAgentToolHost();
+      const crossProviderTools = crossProviderToolHost
+        ? yield* crossProviderToolHost.toolsForThread(options.threadId)
+        : Option.none<ReadonlyArray<CrossProviderToolSpec>>();
 
       const opened = yield* openCodexThread({
         client,
@@ -2244,6 +2359,9 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(Option.isSome(crossProviderTools)
+          ? { dynamicTools: crossProviderTools.value.map(toCodexDynamicToolSpec) }
+          : {}),
       });
 
       const providerThreadId = opened.thread.id;

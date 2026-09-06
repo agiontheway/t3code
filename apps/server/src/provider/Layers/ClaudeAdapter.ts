@@ -71,6 +71,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
@@ -82,6 +83,14 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import {
+  readCrossProviderAgentToolHost,
+  type CrossProviderToolSpec,
+} from "../CrossProviderAgentToolHost.ts";
+import {
+  buildClaudeInProcessToolServer,
+  CLAUDE_IN_PROCESS_SERVER_NAME,
+} from "./claudeInProcessTools.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
@@ -4607,6 +4616,37 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           : {}),
       };
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+      // Cross-provider agent tools ride on an in-process SDK server so they
+      // need no HTTP MCP session. Consulted on every start and resume so a
+      // policy change takes effect at the next session boundary.
+      const crossProviderToolHost = readCrossProviderAgentToolHost();
+      const crossProviderTools = crossProviderToolHost
+        ? yield* crossProviderToolHost.toolsForThread(threadId)
+        : Option.none<ReadonlyArray<CrossProviderToolSpec>>();
+      const crossProviderToolServer = Option.isSome(crossProviderTools)
+        ? buildClaudeInProcessToolServer({
+            threadId,
+            specs: crossProviderTools.value,
+            host: crossProviderToolHost!,
+            runPromise,
+          })
+        : undefined;
+      const mcpServers: NonNullable<ClaudeQueryOptions["mcpServers"]> = {
+        ...(mcpSession
+          ? {
+              "t3-code": {
+                type: "http",
+                url: mcpSession.endpoint,
+                headers: {
+                  Authorization: mcpSession.authorizationHeader,
+                },
+              },
+            }
+          : {}),
+        ...(crossProviderToolServer
+          ? { [CLAUDE_IN_PROCESS_SERVER_NAME]: crossProviderToolServer }
+          : {}),
+      };
       // The attachments dir grant lets the agent Read/copy pasted images at
       // the paths ProviderService injects into the turn text, without an
       // approval prompt. It is a leaf directory holding only attachment
@@ -4647,19 +4687,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         env: claudeEnvironment,
         additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
-        ...(mcpSession
-          ? {
-              mcpServers: {
-                "t3-code": {
-                  type: "http",
-                  url: mcpSession.endpoint,
-                  headers: {
-                    Authorization: mcpSession.authorizationHeader,
-                  },
-                },
-              },
-            }
-          : {}),
+        ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
       };
 
       yield* Effect.annotateCurrentSpan({
