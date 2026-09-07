@@ -91,6 +91,10 @@
       "types": "./src/serverSettings.ts",
       "import": "./src/serverSettings.ts"
     },
+    "./crossProviderAgentRoutes": {
+      "types": "./src/crossProviderAgentRoutes.ts",
+      "import": "./src/crossProviderAgentRoutes.ts"
+    },
     "./backgroundActivitySettings": {
       "types": "./src/backgroundActivitySettings.ts",
       "import": "./src/backgroundActivitySettings.ts"

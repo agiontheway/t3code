@@ -458,6 +458,31 @@ describe("serverSettings helpers", () => {
     });
   });
 
+  it("replaces crossProviderAgentRoutes wholesale so removed routes do not linger", () => {
+    const codexId = ProviderInstanceId.make("codex");
+    const claudeId = ProviderInstanceId.make("claudeAgent");
+    const current = {
+      ...DEFAULT_SERVER_SETTINGS,
+      crossProviderAgentRoutes: {
+        [codexId]: { enabled: true, models: ["gpt-5.6-sol"] },
+        [claudeId]: { enabled: true, models: [] },
+      },
+    };
+
+    expect(
+      applyServerSettingsPatch(current, {
+        crossProviderAgentRoutes: { [codexId]: { enabled: false, models: [] } },
+      }).crossProviderAgentRoutes,
+    ).toEqual({ [codexId]: { enabled: false, models: [] } });
+    // An empty map means "back to generated defaults", not "keep mine".
+    expect(
+      applyServerSettingsPatch(current, { crossProviderAgentRoutes: {} }).crossProviderAgentRoutes,
+    ).toEqual({});
+    expect(
+      applyServerSettingsPatch(current, { crossProviderAgentMaxDepth: 3 }).crossProviderAgentRoutes,
+    ).toEqual(current.crossProviderAgentRoutes);
+  });
+
   it("upserts and removes usageLimitSources per entry so concurrent edits cannot clobber", () => {
     const hubA = UsageLimitSourceId.make("cliproxy-a");
     const hubB = UsageLimitSourceId.make("cliproxy-b");
