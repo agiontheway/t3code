@@ -32,10 +32,12 @@
     "msgpackr-extract": "3.0.4",
     "node-pty": "^1.1.0",
     "yaml": "catalog:",
-    "yauzl": "^3.4.0"
+    "yauzl": "^3.4.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@t3tools/tailscale": "workspace:*",

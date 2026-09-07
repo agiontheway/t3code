@@ -81,13 +81,18 @@ function finishDispatchingQueuedMessage(queuedMessageId: MessageId): void {
   appAtomRegistry.set(dispatchingQueuedMessageIdAtom, current === queuedMessageId ? null : current);
 }
 
-function findThread(
-  threads: ReadonlyArray<EnvironmentThreadShell>,
-  message: QueuedThreadMessage,
-): EnvironmentThreadShell | undefined {
-  return threads.find(
-    (candidate) =>
-      candidate.environmentId === message.environmentId && candidate.id === message.threadId,
+/**
+ * Point read, not a list lookup: thread lists exclude spawned child threads,
+ * and a message queued to one of those must still find its target.
+ */
+function readQueuedMessageThread(message: QueuedThreadMessage): EnvironmentThreadShell | undefined {
+  return (
+    appAtomRegistry.get(
+      environmentThreadShells.threadShellAtom({
+        environmentId: message.environmentId,
+        threadId: message.threadId,
+      }),
+    ) ?? undefined
   );
 }
 
@@ -1003,7 +1008,7 @@ export function useThreadOutboxDrain(): void {
         continue;
       }
 
-      const thread = findThread(threads, nextQueuedMessage);
+      const thread = readQueuedMessageThread(nextQueuedMessage);
       if (thread && scopedThreadKey(thread.environmentId, thread.id) !== threadKey) {
         continue;
       }
@@ -1120,10 +1125,7 @@ export function useThreadOutboxDrain(): void {
         // against the live thread snapshot so a vanished thread or newly
         // created target defers, while busy existing threads can still steer.
         if (deliveryAction === "send") {
-          const liveThread = findThread(
-            appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
-            nextQueuedMessage,
-          );
+          const liveThread = readQueuedMessageThread(nextQueuedMessage);
           const liveThreadBusy =
             liveThread?.session?.status === "running" || liveThread?.session?.status === "starting";
           const liveDeliveryAction = resolveThreadOutboxDeliveryAction({
@@ -1174,6 +1176,9 @@ export function useThreadOutboxDrain(): void {
         });
       return;
     }
+    // `threads` is not read inside the effect (thread existence is a point
+    // read so spawned child threads resolve), but a thread appearing or
+    // changing must still re-run the drain for messages deferred on it.
   }, [
     connectedEnvironments,
     dispatchingQueuedMessageId,

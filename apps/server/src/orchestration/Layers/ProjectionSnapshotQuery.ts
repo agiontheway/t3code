@@ -28,6 +28,7 @@ import {
   ModelSelection,
   ProjectId,
   ThreadLinkedPullRequest,
+  ThreadSpawnMetadata,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
@@ -115,6 +116,7 @@ const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
+    spawn: Schema.NullOr(Schema.fromJsonString(ThreadSpawnMetadata)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
   }),
@@ -500,6 +502,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          spawn_json AS "spawn",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -540,6 +543,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          spawn_json AS "spawn",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -582,6 +586,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          spawn_json AS "spawn",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -864,6 +869,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const countThreadActivityRowsByKind = SqlSchema.findOne({
+    Request: Schema.Struct({ threadId: ThreadId, kind: Schema.String }),
+    Result: Schema.Struct({ count: Schema.Number }),
+    execute: ({ threadId, kind }) =>
+      sql`
+        SELECT COUNT(*) AS "count"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND kind = ${kind}
+      `,
+  });
+
   const readEventReplayStats = SqlSchema.findOne({
     Request: EventReplayStatsInput,
     Result: EventReplayStatsRowSchema,
@@ -915,6 +932,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             ON projects.project_id = threads.project_id
           WHERE threads.deleted_at IS NULL
             AND threads.archived_at IS NULL
+            AND threads.spawn_json IS NULL
             AND projects.deleted_at IS NULL
             AND messages.is_streaming = 0
             AND (
@@ -1073,6 +1091,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          spawn_json AS "spawn",
           linked_pull_request_json AS "linkedPullRequest",
           branch_pull_request_json AS "branchPullRequest",
           latest_turn_id AS "latestTurnId",
@@ -2087,6 +2106,7 @@ pending_approval_requests AS (
                 pinnedAt: row.pinnedAt,
                 pinOrderKey: row.pinOrderKey ?? null,
                 activeOrderKey: row.activeOrderKey ?? null,
+                ...(row.spawn ? { spawn: row.spawn } : {}),
                 titleRegeneration: mapTitleRegeneration(row),
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
@@ -2302,6 +2322,7 @@ pending_approval_requests AS (
                   pinnedAt: row.pinnedAt,
                   pinOrderKey: row.pinOrderKey ?? null,
                   activeOrderKey: row.activeOrderKey ?? null,
+                  ...(row.spawn ? { spawn: row.spawn } : {}),
                   titleRegeneration: mapTitleRegeneration(row),
                   deletedAt: row.deletedAt,
                   messages: [],
@@ -2444,6 +2465,7 @@ pending_approval_requests AS (
                       pinnedAt: row.pinnedAt,
                       pinOrderKey: row.pinOrderKey ?? null,
                       activeOrderKey: row.activeOrderKey ?? null,
+                      ...(row.spawn ? { spawn: row.spawn } : {}),
                       titleRegeneration: mapTitleRegeneration(row),
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
@@ -2594,6 +2616,7 @@ pending_approval_requests AS (
                 pinnedAt: row.pinnedAt,
                 pinOrderKey: row.pinOrderKey ?? null,
                 activeOrderKey: row.activeOrderKey ?? null,
+                ...(row.spawn ? { spawn: row.spawn } : {}),
                 titleRegeneration: mapTitleRegeneration(row),
                 session: sessionByThread.get(row.threadId) ?? null,
                 latestUserMessageAt: row.latestUserMessageAt,
@@ -2693,6 +2716,19 @@ pending_approval_requests AS (
       })),
     };
   });
+
+  const countThreadActivitiesByKind: ProjectionSnapshotQueryShape["countThreadActivitiesByKind"] = (
+    input,
+  ) =>
+    countThreadActivityRowsByKind(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.countThreadActivitiesByKind:query",
+          "ProjectionSnapshotQuery.countThreadActivitiesByKind:decodeRow",
+        ),
+      ),
+      Effect.map((row) => row.count),
+    );
 
   const getActiveProjectByWorkspaceRoot: ProjectionSnapshotQueryShape["getActiveProjectByWorkspaceRoot"] =
     (workspaceRoot) =>
@@ -2917,6 +2953,7 @@ pending_approval_requests AS (
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
+        ...(threadRow.value.spawn ? { spawn: threadRow.value.spawn } : {}),
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
@@ -3200,6 +3237,7 @@ pending_approval_requests AS (
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         activeOrderKey: threadRow.value.activeOrderKey ?? null,
+        ...(threadRow.value.spawn ? { spawn: threadRow.value.spawn } : {}),
         titleRegeneration: mapTitleRegeneration(threadRow.value),
         deletedAt: null,
         messages: messageRows.map((row) => {
@@ -3412,6 +3450,7 @@ pending_approval_requests AS (
     getImportedAgentSessionSources,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
+    countThreadActivitiesByKind,
     getThreadShellById,
     getThreadRuntimeContext,
     getTurnStartMessage,

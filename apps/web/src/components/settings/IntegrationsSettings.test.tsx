@@ -27,7 +27,8 @@ vi.mock("../../hooks/useSettings", () => ({
     selector(DEFAULT_CLIENT_SETTINGS),
   useClientSettingsHydrated: () => true,
   usePrimarySettingsAvailable: () => true,
-  usePrimarySettings: () => DEFAULT_UNIFIED_SETTINGS,
+  usePrimarySettings: (selector?: (settings: typeof DEFAULT_UNIFIED_SETTINGS) => unknown) =>
+    selector ? selector(DEFAULT_UNIFIED_SETTINGS) : DEFAULT_UNIFIED_SETTINGS,
   useUpdatePrimarySettings: () => vi.fn(),
 }));
 vi.mock("./settingsLayout", async (importOriginal) => ({

@@ -1,4 +1,5 @@
 import {
+  type CrossProviderAgentRoutes,
   DEFAULT_SERVER_SETTINGS,
   type EditorId,
   type EnvironmentTheme,
@@ -89,6 +90,15 @@ export const primaryServerProvidersAtom = Atom.make(
   (get): ReadonlyArray<ServerProvider> =>
     get(primaryServerConfigAtom)?.providers ?? EMPTY_SERVER_PROVIDERS,
 ).pipe(Atom.withLabel("web-primary-server-providers"));
+
+const EMPTY_CROSS_PROVIDER_ROUTE_DEFAULTS: CrossProviderAgentRoutes = {};
+
+/** Server-derived generated cross-provider routes; empty until a server that computes them answers. */
+export const primaryServerCrossProviderRouteDefaultsAtom = Atom.make(
+  (get): CrossProviderAgentRoutes =>
+    get(primaryServerConfigAtom)?.crossProviderAgentRouteDefaults ??
+    EMPTY_CROSS_PROVIDER_ROUTE_DEFAULTS,
+).pipe(Atom.withLabel("web-primary-server-cross-provider-route-defaults"));
 
 export const primaryServerKeybindingsAtom = Atom.make(
   (get): ServerConfig["keybindings"] =>

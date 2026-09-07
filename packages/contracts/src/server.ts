@@ -25,7 +25,7 @@ import { EditorId, FileManagerRevealKind, RemoteOpenTarget } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
-import { ServerSettings } from "./settings.ts";
+import { CrossProviderAgentRoutes, ServerSettings } from "./settings.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -561,6 +561,12 @@ export const ServerConfig = Schema.Struct({
   remoteOpenTargets: Schema.optionalKey(ForwardCompatibleArray(RemoteOpenTarget)),
   observability: ServerObservability,
   settings: ServerSettings,
+  /**
+   * Server-derived generated cross-provider routes (every enabled, not signed-out
+   * Claude/Codex instance, all models). Clients render and materialise from
+   * this, never from their own provider snapshot. Absent on older servers.
+   */
+  crossProviderAgentRouteDefaults: Schema.optionalKey(CrossProviderAgentRoutes),
   /** Whether shell subscriptions can emit an opt-in catch-up completion marker. */
   shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),
   /** Whether shell.openInEditor honors `LaunchEditorInput.reveal` for the
@@ -647,6 +653,8 @@ export type ServerConfigKeybindingsUpdatedPayload =
 
 export const ServerConfigProviderStatusesPayload = Schema.Struct({
   providers: ServerProviders,
+  /** Recomputed with every provider change; see `ServerConfig.crossProviderAgentRouteDefaults`. */
+  crossProviderAgentRouteDefaults: Schema.optionalKey(CrossProviderAgentRoutes),
 });
 export type ServerConfigProviderStatusesPayload = typeof ServerConfigProviderStatusesPayload.Type;
 
