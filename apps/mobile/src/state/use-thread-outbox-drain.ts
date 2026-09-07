@@ -15,8 +15,9 @@ import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert } from "react-native";
 
-import { scopedProjectKey, scopedThreadKey } from "../lib/scopedEntities";
+import { scopedThreadKey } from "../lib/scopedEntities";
 import { buildProjectThreadStartTurnInput } from "../lib/projectThreadStartTurn";
 import { prepareTurnAttachments, type PreparedTurnAttachments } from "../lib/attachmentUpload";
 import { randomHex } from "../lib/uuid";
@@ -26,7 +27,6 @@ import { useProjects, useServerConfigs, useThreadShells } from "./entities";
 import { serverEnvironment } from "./server";
 import {
   confirmThreadOutboxMessageQueued,
-  ensureThreadOutboxLoaded,
   threadOutboxManager,
   threadOutboxRevision,
   updateThreadOutboxMessage,
@@ -53,6 +53,7 @@ import {
   type ComposerDraft,
   getComposerDraftSnapshot,
   mergeComposerDraftContent,
+  newTaskDraftKey,
   replaceComposerDraftAttachments,
   removeDeliveredCloudQueuedMessage,
   undoComposerDraftMerge,
@@ -80,13 +81,18 @@ function finishDispatchingQueuedMessage(queuedMessageId: MessageId): void {
   appAtomRegistry.set(dispatchingQueuedMessageIdAtom, current === queuedMessageId ? null : current);
 }
 
-function findThread(
-  threads: ReadonlyArray<EnvironmentThreadShell>,
-  message: QueuedThreadMessage,
-): EnvironmentThreadShell | undefined {
-  return threads.find(
-    (candidate) =>
-      candidate.environmentId === message.environmentId && candidate.id === message.threadId,
+/**
+ * Point read, not a list lookup: thread lists exclude spawned child threads,
+ * and a message queued to one of those must still find its target.
+ */
+function readQueuedMessageThread(message: QueuedThreadMessage): EnvironmentThreadShell | undefined {
+  return (
+    appAtomRegistry.get(
+      environmentThreadShells.threadShellAtom({
+        environmentId: message.environmentId,
+        threadId: message.threadId,
+      }),
+    ) ?? undefined
   );
 }
 
@@ -369,6 +375,7 @@ export async function restoreRejectedQueuedMessage(
 
     let mergedDraft: ComposerDraft;
     try {
+      stampRecoveryDraftProject(queuedMessage, draftKey);
       await mergeComposerDraftContent(draftKey, {
         text: queuedMessage.text,
         attachments: queuedMessage.attachments,
@@ -451,10 +458,29 @@ export async function restoreRejectedQueuedMessage(
   }
 }
 
+/**
+ * A rejected creation becomes its own new-task draft rather than merging into
+ * whatever the user is typing for that project. The key derives from the
+ * message id so a retry after a mid-recovery failure lands on the same draft
+ * instead of minting another.
+ */
 function recoveryDraftKey(queuedMessage: QueuedThreadMessage): string {
   return queuedMessage.creation
-    ? `new-task:${scopedProjectKey(queuedMessage.environmentId, queuedMessage.creation.projectId)}`
+    ? newTaskDraftKey(`restored-${queuedMessage.messageId}`)
     : scopedThreadKey(queuedMessage.environmentId, queuedMessage.threadId);
+}
+
+function stampRecoveryDraftProject(queuedMessage: QueuedThreadMessage, draftKey: string): void {
+  if (!queuedMessage.creation) {
+    return;
+  }
+  updateComposerDraftSettings(draftKey, {
+    project: {
+      environmentId: queuedMessage.environmentId,
+      projectId: queuedMessage.creation.projectId,
+      createdAt: queuedMessage.createdAt,
+    },
+  });
 }
 
 async function preserveUploadedAttachmentsForEditor(
@@ -583,8 +609,21 @@ export function useThreadOutboxDrain(): void {
   );
 
   useEffect(() => {
-    ensureThreadOutboxLoaded();
+    let mounted = true;
+    const load = async () => {
+      if ((await threadOutboxManager.load()) || !mounted) return;
+      Alert.alert(
+        "Some queued messages could not be loaded",
+        "Unreadable records and attachment files are still saved. Other messages can still be sent.",
+        [
+          { text: "Dismiss", style: "cancel" },
+          { text: "Retry", onPress: () => void load() },
+        ],
+      );
+    };
+    void load();
     return () => {
+      mounted = false;
       for (const timer of retryTimersRef.current.values()) {
         clearTimeout(timer);
       }
@@ -766,12 +805,6 @@ export function useThreadOutboxDrain(): void {
         (await completeQueuedMessageDelivery(persistedMessage, deliveryRevision)) === "removed";
       if (delivered) {
         acknowledgedExistingThreadMessageIdsRef.current.delete(persistedMessage.messageId);
-        // The delivered turn holds its own copy of the bytes. A failed delete
-        // is surfaced (never fails the delivered turn); the server also
-        // expires leaked pending uploads.
-        await prepared.releaseUploads().catch((error) => {
-          console.warn("[thread-outbox] could not delete consumed pending uploads", error);
-        });
       }
       return delivered;
     },
@@ -904,13 +937,7 @@ export function useThreadOutboxDrain(): void {
         // payload as a duplicate creation. Hand it to the thread's composer.
         return recoverEditedCreationAfterDelivery(persistedMessage);
       }
-      if (outcome === "removed") {
-        await prepared.releaseUploads().catch((error) => {
-          console.warn("[thread-outbox] could not delete consumed pending uploads", error);
-        });
-        return true;
-      }
-      return false;
+      return outcome === "removed";
     },
     [makeDeliveryHelpers, restoreQueuedMessage, startTurn],
   );
@@ -981,7 +1008,7 @@ export function useThreadOutboxDrain(): void {
         continue;
       }
 
-      const thread = findThread(threads, nextQueuedMessage);
+      const thread = readQueuedMessageThread(nextQueuedMessage);
       if (thread && scopedThreadKey(thread.environmentId, thread.id) !== threadKey) {
         continue;
       }
@@ -1098,10 +1125,7 @@ export function useThreadOutboxDrain(): void {
         // against the live thread snapshot so a vanished thread or newly
         // created target defers, while busy existing threads can still steer.
         if (deliveryAction === "send") {
-          const liveThread = findThread(
-            appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
-            nextQueuedMessage,
-          );
+          const liveThread = readQueuedMessageThread(nextQueuedMessage);
           const liveThreadBusy =
             liveThread?.session?.status === "running" || liveThread?.session?.status === "starting";
           const liveDeliveryAction = resolveThreadOutboxDeliveryAction({
@@ -1152,6 +1176,9 @@ export function useThreadOutboxDrain(): void {
         });
       return;
     }
+    // `threads` is not read inside the effect (thread existence is a point
+    // read so spawned child threads resolve), but a thread appearing or
+    // changing must still re-run the drain for messages deferred on it.
   }, [
     connectedEnvironments,
     dispatchingQueuedMessageId,

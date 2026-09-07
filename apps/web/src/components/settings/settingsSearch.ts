@@ -2,6 +2,7 @@ import { isElectron } from "~/env";
 import { isMacPlatform, isWindowsPlatform, normalizeSearchText } from "~/lib/utils";
 
 export type SettingsPath =
+  | "/settings/projects"
   | "/settings/general"
   | "/settings/appearance"
   | "/settings/keybindings"
@@ -49,6 +50,7 @@ export interface SettingsSearchAvailability {
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/general": "General",
   "/settings/appearance": "Appearance",
+  "/settings/projects": "Projects",
   "/settings/keybindings": "Keybindings",
   "/settings/providers": "Providers",
   "/settings/integrations": "Integrations",
@@ -63,6 +65,14 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
  * that may not be mounted point at their nearest stable section instead.
  */
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "project-defaults",
+    title: "Project defaults and overrides",
+    to: "/settings/projects",
+    searchTerms: [
+      "model workspace browser machines projects inheritance automatic pull checkout grouping actions scripts",
+    ],
+  },
   {
     id: "color-scheme",
     title: "Color scheme",
@@ -218,9 +228,11 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "continue-threads-after-server-update",
-    title: "Continue threads after server updates",
+    title: "Continue threads after restarts",
     to: "/settings/general",
-    searchTerms: ["resume running active work restart desktop update automatically"],
+    searchTerms: [
+      "resume running active interrupted work restart reboot machine crash desktop update automatically",
+    ],
   },
   {
     id: "background-activity",
@@ -233,14 +245,13 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "new-threads",
     title: "New threads",
-    to: "/settings/general",
+    to: "/settings/projects",
     searchTerms: ["default workspace mode draft local worktree"],
   },
   {
     id: "start-from-origin",
     title: "Start from origin",
     to: "/settings/general",
-    targetId: "new-threads",
     searchTerms: ["new worktrees latest matching remote branch local"],
   },
   {
@@ -343,8 +354,32 @@ export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "agent-browser-access",
     title: "Agent browser access",
-    to: "/settings/integrations",
+    to: "/settings/projects",
     searchTerms: ["allow open drive preview tools sessions"],
+  },
+  {
+    id: "cross-provider-agent-access",
+    title: "Cross-provider agent access",
+    to: "/settings/integrations",
+    searchTerms: ["agents spawn child threads other providers codex claude delegate quota"],
+  },
+  {
+    id: "cross-provider-agent-max-depth",
+    title: "Max orchestration depth",
+    to: "/settings/integrations",
+    searchTerms: ["agents nested sub-orchestrator fan out levels"],
+  },
+  {
+    id: "cross-provider-agent-output-cap",
+    title: "Child output cap",
+    to: "/settings/integrations",
+    searchTerms: ["agents result characters truncated head tail"],
+  },
+  {
+    id: "cross-provider-agent-routes",
+    title: "Cross-provider routes",
+    to: "/settings/integrations",
+    searchTerms: ["agents allowed provider instances models eligibility restore defaults"],
   },
   {
     id: "browser-profiles",
@@ -502,6 +537,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Remote environments",
     to: "/settings/connections",
     searchTerms: ["add pair backend host code ssh config agent tunnel saved t3 connect"],
+  },
+  {
+    id: "load-balancing",
+    title: "Load balancing",
+    to: "/settings/connections",
+    searchTerms: [
+      "automatic machine environment resources cpu memory capacity preference weight shared projects",
+    ],
   },
   {
     id: "archive",

@@ -11,9 +11,12 @@ import type {
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -23,11 +26,13 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Random from "effect/Random";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -36,7 +41,12 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  clearCrossProviderAgentToolHost,
+  setCrossProviderAgentToolHost,
+} from "../CrossProviderAgentToolHost.ts";
 import {
   SYNTHETIC_CLAUDE_CAPABLE_MODEL,
   SYNTHETIC_CLAUDE_COLLIDING_ALIAS,
@@ -2252,6 +2262,54 @@ describe("ClaudeAdapterLive", () => {
     return Effect.forEach(reasons, runDeadTurn, { discard: true });
   });
 
+  it.effect.each(["success", "error_during_execution"] as const)(
+    "preserves %s behavior for an unknown runtime terminal reason",
+    (subtype) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const completionFiber = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId: session.threadId, input: "hello", attachments: [] });
+        // An installed CLI can send a terminal reason newer than the bundled SDK.
+        harness.query.emit({
+          type: "result",
+          subtype,
+          is_error: subtype !== "success",
+          result: "",
+          errors: subtype === "success" ? [] : ["Provider error detail"],
+          stop_reason: null,
+          terminal_reason: "future_terminal_reason",
+          session_id: "sdk-session-future-reason",
+          uuid: "result-future-reason",
+        } as unknown as SDKMessage);
+        const completed = yield* Fiber.join(completionFiber);
+        assert.equal(completed._tag, "Some");
+        if (completed._tag === "Some" && completed.value.type === "turn.completed") {
+          assert.equal(
+            completed.value.payload.state,
+            subtype === "success" ? "completed" : "failed",
+          );
+          assert.equal(
+            completed.value.payload.errorMessage,
+            subtype === "success" ? undefined : "Provider error detail",
+          );
+        }
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("fails a turn when a success result reports a 529 overload", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -3449,10 +3507,14 @@ describe("ClaudeAdapterLive", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
-      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
-      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
-        Effect.sync(() => runtimeEvents.push(event)),
-      ).pipe(Effect.forkChild);
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil(
+          (event) =>
+            event.type === "session.state.changed" && event.payload.reason === "api_retry:3/10",
+        ),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
 
       yield* adapter.startSession({
         threadId: THREAD_ID,
@@ -3498,7 +3560,6 @@ describe("ClaudeAdapterLive", () => {
           uuid: "tu",
         },
         { type: "system", subtype: "commands_changed", session_id: "session", uuid: "cc" },
-        { type: "system", subtype: "model_refusal_fallback", session_id: "session", uuid: "mrf" },
         { type: "system", subtype: "local_command_output", session_id: "session", uuid: "lco" },
         { type: "system", subtype: "plugin_install", session_id: "session", uuid: "pi" },
         { type: "system", subtype: "memory_recall", session_id: "session", uuid: "mr" },
@@ -3545,6 +3606,21 @@ describe("ClaudeAdapterLive", () => {
       ]) {
         harness.query.emit(message as unknown as SDKMessage);
       }
+      // Safety model-fallback notices DO surface as a warning row.
+      harness.query.emit({
+        type: "system",
+        subtype: "model_refusal_fallback",
+        trigger: "refusal",
+        direction: "retry",
+        original_model: "claude-fable-5",
+        fallback_model: "claude-opus-4-8",
+        request_id: "req_test",
+        api_refusal_category: "cyber",
+        api_refusal_explanation: null,
+        content: "Safeguards flagged this message. Switched to Opus 4.8.",
+        session_id: "session",
+        uuid: "mrf",
+      } as unknown as SDKMessage);
       // High-priority notifications DO surface as a warning row.
       harness.query.emit({
         type: "system",
@@ -3602,15 +3678,15 @@ describe("ClaudeAdapterLive", () => {
         session_id: "session",
         uuid: "retry",
       } as unknown as SDKMessage);
-      yield* Effect.yieldNow;
-      yield* Effect.yieldNow;
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
 
       const warnings = runtimeEvents.filter((event) => event.type === "runtime.warning");
-      // Exactly three warnings: the high-priority notification, the
+      // Exactly four warnings: the fallback notice, high-priority notification,
       // warning-level informational note, and the refusal. Nothing else.
       assert.deepEqual(
         warnings.map((event) => event.payload.message),
         [
+          "Safeguards flagged this message. Switched to Opus 4.8.",
           "context window nearly full",
           "Stop hook prevented continuation",
           "The request was declined by the API.",
@@ -3638,6 +3714,528 @@ describe("ClaudeAdapterLive", () => {
           event.payload.reason.startsWith("api_retry:"),
       );
       assert.equal(heartbeat?.type, "session.state.changed");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  const observeUsageLimitEvents = (adapter: ClaudeAdapterShape, query: FakeClaudeQuery) =>
+    Effect.gen(function* () {
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      let receipt: Deferred.Deferred<void> | undefined;
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (
+            receipt &&
+            event.type === "session.state.changed" &&
+            event.payload.reason === "api_retry:1/1"
+          ) {
+            yield* Deferred.succeed(receipt, undefined);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+      const drainSdkMessages = Effect.gen(function* () {
+        receipt = yield* Deferred.make<void>();
+        // The heartbeat follows queued SDK messages without adding a warning.
+        query.emit({
+          type: "system",
+          subtype: "api_retry",
+          attempt: 1,
+          max_retries: 1,
+          retry_delay_ms: 0,
+          error_status: 429,
+          error: { type: "rate_limit_error" },
+          session_id: "sdk-session-limit",
+          uuid: "usage-limit-drain",
+        } as unknown as SDKMessage);
+        yield* Deferred.await(receipt);
+      });
+      return { runtimeEvents, runtimeEventsFiber, drainSdkMessages };
+    });
+
+  it.effect("surfaces a rejected Claude usage limit once per turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      // resetsAt is epoch seconds, so the window reopens 4h 1m30s out.
+      const nowMs = yield* Clock.currentTimeMillis;
+      const rateLimitInfo = {
+        status: "rejected",
+        rateLimitType: "five_hour",
+        utilization: 1,
+        resetsAt: Math.floor(nowMs / 1000) + 4 * 60 * 60 + 90,
+      };
+      const rejected = {
+        type: "rate_limit_event",
+        rate_limit_info: rateLimitInfo,
+        session_id: "sdk-session-limit",
+        uuid: "rate-limit-rejected",
+      };
+      // Sibling fields drift while the window is parked, so the same rendered
+      // line can arrive more than once inside one turn.
+      harness.query.emit(rejected as unknown as SDKMessage);
+      yield* drainSdkMessages;
+      // The repeat lands minutes later, so the remaining wait has visibly
+      // shrunk. Deduping on the rendered row would let that drift through.
+      yield* TestClock.adjust("5 minutes");
+      harness.query.emit(rejected as unknown as SDKMessage);
+      yield* drainSdkMessages;
+
+      const usageLimitRows = () =>
+        runtimeEvents
+          .filter((event) => event.type === "runtime.warning")
+          .map((event) => (event.type === "runtime.warning" ? event.payload.message : ""));
+      assert.equal(usageLimitRows().length, 1);
+      // A wait, not a wall clock: the server renders this row but clients read
+      // it from other timezones. Reading resetsAt as milliseconds would put the
+      // window minutes out instead of hours, so the hour also pins the scale.
+      assert.match(
+        usageLimitRows()[0] ?? "",
+        /^Claude usage limit reached\. This turn is paused until the 5-hour limit resets in 4h( \d{1,2}m)?\.$/,
+      );
+      // The exact instant still rides along for clients that want to render it.
+      assert.deepEqual(
+        runtimeEvents.find((event) => event.type === "runtime.warning")?.payload.detail,
+        rateLimitInfo,
+      );
+      // The raw telemetry event still flows for every copy.
+      assert.equal(
+        runtimeEvents.filter((event) => event.type === "account.rate-limits.updated").length,
+        2,
+      );
+
+      // Same window, drifting siblings: still the one pause.
+      harness.query.emit({
+        ...rejected,
+        rate_limit_info: { ...rateLimitInfo, utilization: 0.99 },
+        uuid: "rate-limit-rejected-drift",
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+      assert.equal(usageLimitRows().length, 1);
+
+      // Retrying inside the same window renders the identical line. Staying
+      // quiet there would put the new turn right back to a silent spin.
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-limit",
+        uuid: "result-limit",
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "retry", attachments: [] });
+      harness.query.emit(rejected as unknown as SDKMessage);
+      yield* drainSdkMessages;
+
+      assert.equal(usageLimitRows().length, 2);
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps allowed and malformed Claude rate-limit events out of the work log", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      // A turn is in flight, so silence here is the status filter doing its job
+      // rather than the between-turns guard.
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      for (const rateLimitInfo of [
+        { status: "allowed", rateLimitType: "five_hour", utilization: 0.4 },
+        { status: "allowed_warning", rateLimitType: "five_hour", utilization: 0.9 },
+        // Undeclared shape from an older/newer CLI must not take the session down.
+        undefined,
+      ]) {
+        harness.query.emit({
+          type: "rate_limit_event",
+          ...(rateLimitInfo ? { rate_limit_info: rateLimitInfo } : {}),
+          session_id: "sdk-session-limit-ok",
+          uuid: `rate-limit-${rateLimitInfo?.status ?? "malformed"}`,
+        } as unknown as SDKMessage);
+      }
+      yield* drainSdkMessages;
+
+      assert.deepEqual(
+        runtimeEvents.filter((event) => event.type === "runtime.warning"),
+        [],
+      );
+      assert.equal(
+        runtimeEvents.filter((event) => event.type === "account.rate-limits.updated").length,
+        2,
+      );
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("stays quiet when no turn is parked by the Claude limit", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      const resetsAt = Math.floor(nowMs / 1000) + 60 * 60;
+      // The stream stays live between turns, so a reject can land with nothing
+      // to pause; claiming "this turn is paused" there would be a lie.
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          utilization: 1,
+          resetsAt,
+        },
+        session_id: "sdk-session-idle",
+        uuid: "rate-limit-idle",
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+      // Provisioned overage carries the request even though the base window
+      // rejected it, so the turn keeps running and needs no row.
+      for (const overage of [
+        { overageStatus: "allowed" },
+        { overageStatus: "allowed_warning" },
+        { isUsingOverage: true },
+        { overageInUse: true },
+      ]) {
+        harness.query.emit({
+          type: "rate_limit_event",
+          rate_limit_info: {
+            status: "rejected",
+            rateLimitType: "five_hour",
+            resetsAt,
+            utilization: 1,
+            ...overage,
+          },
+          session_id: "sdk-session-idle",
+          uuid: "rate-limit-overage",
+        } as unknown as SDKMessage);
+      }
+      yield* drainSdkMessages;
+
+      assert.deepEqual(
+        runtimeEvents.filter((event) => event.type === "runtime.warning"),
+        [],
+      );
+      // Idle and overage-covered events still reach the account telemetry stream.
+      assert.equal(
+        runtimeEvents.filter((event) => event.type === "account.rate-limits.updated").length,
+        5,
+      );
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("still surfaces the pause when overage is exhausted too", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      const resetsAt = Math.floor(nowMs / 1000) + 60 * 60;
+      // The overage-exhausted / out-of-credits shape: the base window and the
+      // overage it would have spent both reject, with neither isUsingOverage
+      // nor overageInUse set to say anything is still covered. Nothing is
+      // carrying the turn here, so staying quiet would be the silent spin
+      // this row exists to prevent.
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          resetsAt,
+          overageStatus: "rejected",
+        },
+        session_id: "sdk-session-dual-reject",
+        uuid: "rate-limit-dual-reject",
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+
+      assert.equal(runtimeEvents.filter((event) => event.type === "runtime.warning").length, 1);
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("keeps one row per window when two Claude limits interleave", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      const nowSeconds = Math.floor(nowMs / 1000);
+      const rejection = (rateLimitType: string, resetsAt: number, uuid: string) => ({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", rateLimitType, resetsAt },
+        session_id: "sdk-session-interleaved",
+        uuid,
+      });
+
+      // One turn can park on more than one window; each deserves its own row,
+      // and a later repeat of an earlier window deserves none.
+      for (const message of [
+        rejection("five_hour", nowSeconds + 2 * 60 * 60, "limit-five-hour"),
+        rejection("seven_day", nowSeconds + 48 * 60 * 60, "limit-seven-day"),
+        rejection("five_hour", nowSeconds + 2 * 60 * 60, "limit-five-hour-repeat"),
+      ]) {
+        harness.query.emit(message as unknown as SDKMessage);
+        yield* drainSdkMessages;
+      }
+
+      assert.deepEqual(
+        runtimeEvents
+          .filter((event) => event.type === "runtime.warning")
+          .map((event) => (event.type === "runtime.warning" ? event.payload.message : ""))
+          .map((message) => message.replace(/ in \d+h( \d{1,2}m)?/, "")),
+        [
+          "Claude usage limit reached. This turn is paused until the 5-hour limit resets.",
+          "Claude usage limit reached. This turn is paused until the 7-day limit resets.",
+        ],
+      );
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("re-announces a Claude limit for a synthetic turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      const nowMs = yield* Clock.currentTimeMillis;
+      const rejected = {
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "five_hour",
+          resetsAt: Math.floor(nowMs / 1000) + 2 * 60 * 60,
+        },
+        session_id: "sdk-session-synthetic",
+        uuid: "rate-limit-synthetic",
+      };
+      harness.query.emit(rejected as unknown as SDKMessage);
+      yield* drainSdkMessages;
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-synthetic",
+        uuid: "result-synthetic",
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+
+      // A background agent answering between prompts auto-starts a synthetic
+      // turn, which parks on the same window and needs its own row.
+      harness.query.emit({
+        type: "assistant",
+        session_id: "sdk-session-synthetic",
+        uuid: "assistant-synthetic",
+        parent_tool_use_id: null,
+        message: {
+          id: "assistant-message-synthetic",
+          content: [{ type: "text", text: "Following up" }],
+        },
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+      harness.query.emit({ ...rejected, uuid: "rate-limit-synthetic-2" } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+
+      assert.equal(runtimeEvents.filter((event) => event.type === "runtime.warning").length, 2);
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("drops an unusable Claude reset time, not the row or the session", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      for (const [rateLimitType, resetsAt] of [
+        ["five_hour", undefined],
+        // Implausibly far out once scaled to milliseconds: no credible wait.
+        ["seven_day", 1e20],
+      ] as const) {
+        harness.query.emit({
+          type: "rate_limit_event",
+          rate_limit_info: { status: "rejected", rateLimitType, resetsAt },
+          session_id: "sdk-session-limit-unusable",
+          uuid: `rate-limit-${rateLimitType}`,
+        } as unknown as SDKMessage);
+      }
+      yield* drainSdkMessages;
+
+      assert.deepEqual(
+        runtimeEvents
+          .filter((event) => event.type === "runtime.warning")
+          .map((event) => (event.type === "runtime.warning" ? event.payload.message : "")),
+        [
+          "Claude usage limit reached. This turn is paused until the 5-hour limit resets.",
+          "Claude usage limit reached. This turn is paused until the 7-day limit resets.",
+        ],
+      );
+      // A throw inside the telemetry handler would tear the session down.
+      assert.deepEqual(
+        runtimeEvents
+          .filter((event) => event.type === "session.exited" || event.type === "runtime.error")
+          .map((event) => event.type),
+        [],
+      );
+      // Still live enough to take the next turn.
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "still here", attachments: [] });
+
+      runtimeEventsFiber.interruptUnsafe();
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("warns for unmapped Claude limits and names the probed model bucket", () => {
+    const scopedLimitNames = Ref.makeUnsafe<ClaudeScopedLimitNames>({ overageIncluded: undefined });
+    const harness = makeHarness({ scopedLimitNames });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { runtimeEvents, runtimeEventsFiber, drainSdkMessages } =
+        yield* observeUsageLimitEvents(adapter, harness.query);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      for (const rateLimitType of ["seven_day_overage_included", "future_window"]) {
+        harness.query.emit({
+          type: "rate_limit_event",
+          rate_limit_info: { status: "rejected", rateLimitType },
+          session_id: "sdk-session-unmapped-limit",
+          uuid: `rejected-${rateLimitType}`,
+        } as unknown as SDKMessage);
+      }
+      yield* drainSdkMessages;
+      assert.deepEqual(
+        runtimeEvents.filter((event) => event.type === "account.rate-limits.updated"),
+        [],
+      );
+
+      yield* Ref.set(scopedLimitNames, { overageIncluded: "Model A" });
+      const nowMs = yield* Clock.currentTimeMillis;
+      harness.query.emit({
+        type: "rate_limit_event",
+        rate_limit_info: {
+          status: "rejected",
+          rateLimitType: "seven_day_overage_included",
+          utilization: 1,
+          resetsAt: Math.floor(nowMs / 1000) + 3600,
+        },
+        session_id: "sdk-session-unmapped-limit",
+        uuid: "rejected-probed-bucket",
+      } as unknown as SDKMessage);
+      yield* drainSdkMessages;
+      assert.deepEqual(
+        runtimeEvents
+          .filter((event) => event.type === "runtime.warning")
+          .map((event) => event.payload.message),
+        [
+          "Claude usage limit reached. This turn is paused until the 7-day model limit resets.",
+          "Claude usage limit reached. This turn is paused until the limit resets.",
+          "Claude usage limit reached. This turn is paused until the 7-day Model A limit resets in 1h.",
+        ],
+      );
+      assert.equal(
+        runtimeEvents.filter((event) => event.type === "account.rate-limits.updated").length,
+        1,
+      );
       runtimeEventsFiber.interruptUnsafe();
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
@@ -6106,6 +6704,305 @@ describe("ClaudeAdapterLive", () => {
         true,
       );
     }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
+
+describe("ClaudeAdapterLive cross-provider in-process tools", () => {
+  const CATALOG_SPEC = {
+    name: "agent_catalog",
+    description: "List eligible cross-provider routes.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  } as const;
+
+  it.effect("injects an in-process t3 server whose tool handler reaches the host", () => {
+    const harness = makeHarness();
+    const calls: Array<{ threadId: ThreadId; tool: string; args: unknown; callId?: string }> = [];
+    setCrossProviderAgentToolHost({
+      toolsForThread: (threadId) =>
+        Effect.succeed(threadId === THREAD_ID ? Option.some([CATALOG_SPEC]) : Option.none()),
+      call: (threadId, tool, args, callId) =>
+        Effect.sync(() => {
+          calls.push({ threadId, tool, args, ...(callId === undefined ? {} : { callId }) });
+          return { output: { routes: [], callerDepth: 0 }, isError: false };
+        }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const mcpServers = harness.getLastCreateQueryInput()?.options.mcpServers;
+      assert.isDefined(mcpServers);
+      assert.deepEqual(Object.keys(mcpServers), ["t3"]);
+      const server = mcpServers.t3;
+      assert.isDefined(server);
+      assert.equal(server.type, "sdk");
+      if (server.type !== "sdk" || !("instance" in server)) {
+        assert.fail("expected an in-process sdk server");
+      }
+
+      // Drive the SDK's McpServer the way the Claude process would, over an
+      // in-memory MCP transport, so the proof covers the real tool wiring.
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      yield* Effect.promise(() => server.instance.connect(serverTransport));
+      const client = new McpClient({ name: "t3-test", version: "0.0.0" });
+      yield* Effect.promise(() => client.connect(clientTransport));
+      yield* Effect.addFinalizer(() => Effect.promise(() => client.close()));
+
+      const tools = yield* Effect.promise(() => client.listTools());
+      assert.deepEqual(
+        tools.tools.map((entry) => entry.name),
+        ["agent_catalog"],
+      );
+      assert.equal(tools.tools[0]?.description, CATALOG_SPEC.description);
+
+      const result = yield* Effect.promise(() =>
+        client.callTool({ name: "agent_catalog", arguments: {} }),
+      );
+      assert.deepEqual(result.content, [{ type: "text", text: '{"routes":[],"callerDepth":0}' }]);
+      assert.notEqual(result.isError, true);
+      assert.equal(calls.length, 1);
+      assert.deepInclude(calls[0], { threadId: THREAD_ID, tool: "agent_catalog", args: {} });
+      // The MCP request id, namespaced per in-process server instance.
+      assert.match(calls[0]?.callId ?? "", /^[0-9a-f-]{36}:\S+$/u);
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("marks host errors on the tool result and keeps the browser MCP server", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+      call: () =>
+        Effect.succeed({
+          output: { error: { code: "access_disabled", message: "Access is off." } },
+          isError: true,
+        }),
+    });
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("env-1"),
+      threadId: THREAD_ID,
+      providerSessionId: "session-1",
+      providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      endpoint: "http://127.0.0.1:1/mcp",
+      authorizationHeader: "Bearer test-token",
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          clearCrossProviderAgentToolHost();
+          McpProviderSession.clearMcpProviderSession(THREAD_ID);
+        }),
+      );
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      const mcpServers = harness.getLastCreateQueryInput()?.options.mcpServers;
+      assert.isDefined(mcpServers);
+      assert.deepEqual(Object.keys(mcpServers).sort(), ["t3", "t3-code"]);
+      assert.equal(mcpServers["t3-code"]?.type, "http");
+      const server = mcpServers.t3;
+      if (server?.type !== "sdk" || !("instance" in server)) {
+        assert.fail("expected an in-process sdk server");
+      }
+
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      yield* Effect.promise(() => server.instance.connect(serverTransport));
+      const client = new McpClient({ name: "t3-test", version: "0.0.0" });
+      yield* Effect.promise(() => client.connect(clientTransport));
+      yield* Effect.addFinalizer(() => Effect.promise(() => client.close()));
+
+      const result = yield* Effect.promise(() =>
+        client.callTool({ name: "agent_catalog", arguments: {} }),
+      );
+      assert.equal(result.isError, true);
+      assert.deepEqual(result.content, [
+        {
+          type: "text",
+          text: '{"error":{"code":"access_disabled","message":"Access is off."}}',
+        },
+      ]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("re-injects the in-process server on resume", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+      call: () => Effect.succeed({ output: {}, isError: false }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: { resume: "550e8400-e29b-41d4-a716-446655440000" },
+        runtimeMode: "full-access",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.resume, "550e8400-e29b-41d4-a716-446655440000");
+      assert.equal(options?.mcpServers?.t3?.type, "sdk");
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("auto-allows mcp__t3__ tools under approval-required and still gates others", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+      call: () => Effect.succeed({ output: {}, isError: false }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "spawn a codex child",
+        attachments: [],
+      });
+      yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.equal(typeof canUseTool, "function");
+      if (!canUseTool) return;
+
+      const allowed = (yield* Effect.promise(() =>
+        canUseTool(
+          "mcp__t3__agent_spawn",
+          { providerInstanceId: "codex", model: "gpt-5.6-sol", prompt: "go" },
+          {
+            signal: new AbortController().signal,
+            requestId: "request-xp-1",
+            suggestions: [],
+            toolUseID: "tool-use-xp-1",
+          },
+        ),
+      )) as PermissionResult;
+      assert.equal(allowed.behavior, "allow");
+
+      // The browser HTTP MCP server shares the `t3` stem but not the prefix:
+      // its tools still go through the user. Because the request stream is
+      // ordered, this being the FIRST request proves the t3 tool opened none.
+      const gatedPromise = canUseTool(
+        "mcp__t3-code__preview_click",
+        { selector: "#go" },
+        {
+          signal: new AbortController().signal,
+          requestId: "request-xp-2",
+          suggestions: [],
+          toolUseID: "tool-use-xp-2",
+        },
+      );
+      const requested = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(requested._tag, "Some");
+      if (requested._tag !== "Some" || requested.value.type !== "request.opened") {
+        return assert.fail("expected the browser tool to open an approval request");
+      }
+      assert.equal(
+        (requested.value.payload.args as { toolName?: string } | undefined)?.toolName,
+        "mcp__t3-code__preview_click",
+      );
+      yield* adapter.respondToRequest(
+        session.threadId,
+        ApprovalRequestId.make(requested.value.requestId!),
+        "decline",
+      );
+      const gated = (yield* Effect.promise(() => gatedPromise)) as PermissionResult;
+      assert.equal(gated.behavior, "deny");
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "drops the server on the resume that follows an interrupt once access is revoked",
+    () => {
+      const harness = makeHarness();
+      let granted = true;
+      setCrossProviderAgentToolHost({
+        toolsForThread: () => Effect.succeed(granted ? Option.some([CATALOG_SPEC]) : Option.none()),
+        call: () => Effect.succeed({ output: {}, isError: false }),
+      });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        assert.equal(harness.getLastCreateQueryInput()?.options.mcpServers?.t3?.type, "sdk");
+
+        // Interrupt tears the query down; the next turn resumes through
+        // startSession, which consults the host again.
+        yield* adapter.interruptTurn(session.threadId);
+        assert.equal(harness.query.closeCalls, 1);
+        granted = false;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          resumeCursor: { resume: "550e8400-e29b-41d4-a716-446655440000" },
+          runtimeMode: "full-access",
+        });
+        const resumed = harness.getLastCreateQueryInput()?.options;
+        assert.equal(resumed?.resume, "550e8400-e29b-41d4-a716-446655440000");
+        assert.isUndefined(resumed?.mcpServers);
+      }).pipe(
+        Effect.scoped,
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("omits mcpServers entirely when no host grants tools", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeedNone,
+      call: () => Effect.succeed({ output: {}, isError: false }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      assert.isUndefined(harness.getLastCreateQueryInput()?.options.mcpServers);
+    }).pipe(
+      Effect.scoped,
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );

@@ -1,4 +1,5 @@
 import {
+  type CrossProviderAgentRoutes,
   DEFAULT_SERVER_SETTINGS,
   type EditorId,
   type EnvironmentTheme,
@@ -29,6 +30,7 @@ export const serverEnvironment = createServerEnvironmentAtoms(connectionAtomRunt
   initialConfigValueAtom: environmentSession.initialConfigValueAtom,
   environmentThemes: true,
   usageLimitSources: true,
+  usageLimitsCommand: true,
 });
 export const environmentServerConfigsAtom = createEnvironmentServerConfigsAtom({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
@@ -49,7 +51,7 @@ const EMPTY_PRIMARY_SERVER_STATE: PrimaryServerState = {
   welcome: null,
 };
 
-export const primaryServerStateAtom = Atom.make((get): PrimaryServerState => {
+const primaryServerStateAtom = Atom.make((get): PrimaryServerState => {
   const environmentId = get(primaryEnvironmentIdAtom);
   if (environmentId === null) {
     return EMPTY_PRIMARY_SERVER_STATE;
@@ -88,6 +90,15 @@ export const primaryServerProvidersAtom = Atom.make(
   (get): ReadonlyArray<ServerProvider> =>
     get(primaryServerConfigAtom)?.providers ?? EMPTY_SERVER_PROVIDERS,
 ).pipe(Atom.withLabel("web-primary-server-providers"));
+
+const EMPTY_CROSS_PROVIDER_ROUTE_DEFAULTS: CrossProviderAgentRoutes = {};
+
+/** Server-derived generated cross-provider routes; empty until a server that computes them answers. */
+export const primaryServerCrossProviderRouteDefaultsAtom = Atom.make(
+  (get): CrossProviderAgentRoutes =>
+    get(primaryServerConfigAtom)?.crossProviderAgentRouteDefaults ??
+    EMPTY_CROSS_PROVIDER_ROUTE_DEFAULTS,
+).pipe(Atom.withLabel("web-primary-server-cross-provider-route-defaults"));
 
 export const primaryServerKeybindingsAtom = Atom.make(
   (get): ServerConfig["keybindings"] =>

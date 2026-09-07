@@ -23,6 +23,10 @@ import * as ProviderSessionRuntime from "../../persistence/ProviderSessionRuntim
 import { ProviderValidationError } from "../Errors.ts";
 import { ProviderSessionReaper } from "../Services/ProviderSessionReaper.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
+import {
+  clearCrossProviderToolsGranted,
+  markCrossProviderToolsGranted,
+} from "../crossProviderToolGrants.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import { makeProviderSessionReaperLive } from "./ProviderSessionReaper.ts";
 
@@ -217,9 +221,12 @@ describe("ProviderSessionReaper", () => {
           getActiveProjectByWorkspaceRoot: () => Effect.die("unused"),
           getProjectShellById: () => Effect.die("unused"),
           getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
+          getImportedAgentSessionSources: () => Effect.die("unused"),
           getThreadCheckpointContext: () => Effect.die("unused"),
           getFullThreadDiffContext: () => Effect.die("unused"),
           getThreadRuntimeContext: () => Effect.die("unused"),
+          getTurnStartMessage: () => Effect.die("unused"),
+          countThreadActivitiesByKind: () => Effect.die("unused"),
           getThreadShellById: (threadId) =>
             Effect.succeed(
               input.readModel.threads.find((thread) => thread.id === threadId)
@@ -331,6 +338,54 @@ describe("ProviderSessionReaper", () => {
     expect(harness.stopSession).not.toHaveBeenCalled();
     const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
     expect(Option.isSome(remaining)).toBe(true);
+  });
+
+  it("skips stale sessions that hold cross-provider agent tools", async () => {
+    const threadId = ThreadId.make("thread-reaper-xp-tools");
+    const now = "2026-01-01T00:00:00.000Z";
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+        },
+      ]),
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId,
+        providerName: "codex",
+        providerInstanceId: null,
+        adapterKey: "codex",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: "2026-04-14T00:00:00.000Z",
+        resumeCursor: { threadId: "codex-thread-xp" },
+        runtimePayload: null,
+      }),
+    );
+    markCrossProviderToolsGranted(threadId);
+    try {
+      await startReaper();
+      await runtime!.runPromise(drainFibers);
+
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
+      expect(Option.isSome(remaining)).toBe(true);
+    } finally {
+      clearCrossProviderToolsGranted(threadId);
+    }
   });
 
   it("skips stale sessions while background work is still live", async () => {

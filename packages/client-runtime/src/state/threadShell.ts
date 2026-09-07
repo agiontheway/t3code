@@ -10,7 +10,7 @@ import type {
 import { Atom } from "effect/unstable/reactivity";
 
 import type { EnvironmentThreadShell } from "./models.ts";
-import { scopeThreadShell } from "./models.ts";
+import { isSpawnedChildThread, scopeThreadShell } from "./models.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
 import {
   arrayElementsEqual,
@@ -62,6 +62,9 @@ export function createEnvironmentThreadShellAtoms(input: {
     ).pipe(Atom.withLabel(`environment-threads:${environmentId}`)),
   );
 
+  // Point reads (the index and `threadShellAtom`) see every thread so a
+  // spawned child stays openable by id; every list below derives from the
+  // listed subset so no list-shaped surface ever shows one.
   const environmentThreadIndexAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get): ReadonlyMap<ThreadId, OrchestrationThreadShell> => {
       const threads = get(environmentThreadsAtom(environmentId));
@@ -72,10 +75,25 @@ export function createEnvironmentThreadShellAtoms(input: {
     }).pipe(Atom.withLabel(`environment-thread-index:${environmentId}`)),
   );
 
+  const environmentListedThreadsAtom = Atom.family((environmentId: EnvironmentId) => {
+    let previous: ReadonlyArray<OrchestrationThreadShell> = EMPTY_THREADS;
+    return Atom.make((get): ReadonlyArray<OrchestrationThreadShell> => {
+      const threads = get(environmentThreadsAtom(environmentId));
+      const next = threads.some(isSpawnedChildThread)
+        ? threads.filter((thread) => !isSpawnedChildThread(thread))
+        : threads;
+      if (arrayElementsEqual(previous, next)) {
+        return previous;
+      }
+      previous = next;
+      return next;
+    }).pipe(Atom.withLabel(`environment-listed-threads:${environmentId}`));
+  });
+
   const environmentThreadRefsAtom = Atom.family((environmentId: EnvironmentId) => {
     let previous: ReadonlyArray<ScopedThreadRef> = [];
     return Atom.make((get) => {
-      const next = get(environmentThreadsAtom(environmentId)).map((thread) => ({
+      const next = get(environmentListedThreadsAtom(environmentId)).map((thread) => ({
         environmentId,
         threadId: thread.id,
       }));
@@ -94,7 +112,7 @@ export function createEnvironmentThreadShellAtoms(input: {
     > = EMPTY_THREAD_REFS_BY_PROJECT;
     return Atom.make((get) => {
       const grouped = new Map<ProjectId, ScopedThreadRef[]>();
-      for (const thread of get(environmentThreadsAtom(environmentId))) {
+      for (const thread of get(environmentListedThreadsAtom(environmentId))) {
         const refs = grouped.get(thread.projectId);
         const ref = { environmentId, threadId: thread.id };
         if (refs === undefined) {
@@ -188,7 +206,7 @@ export function createEnvironmentThreadShellAtoms(input: {
   const threadShellsAtom = Atom.make((get) => {
     const next: EnvironmentThreadShell[] = [];
     for (const environmentId of get(input.catalogValueAtom).entries.keys()) {
-      for (const thread of get(environmentThreadsAtom(environmentId))) {
+      for (const thread of get(environmentListedThreadsAtom(environmentId))) {
         next.push(scopedThread(environmentId, thread));
       }
     }

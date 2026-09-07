@@ -79,6 +79,8 @@ export interface RuntimeSubagent {
   readonly workflowName: string | null;
   readonly phases: ReadonlyArray<SubagentWorkflowPhase>;
   readonly runHandles: SubagentRunHandles | null;
+  /** The child's own thread when the agent is one (cross-provider spawns); null for in-session subagents. */
+  readonly childThreadId: string | null;
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
   /** First retained observation, used as the roster's stable display order. */
   readonly firstSeenAt: string;
@@ -248,6 +250,7 @@ interface MutableAgent {
   workflowName: string | null;
   phases: ReadonlyArray<SubagentWorkflowPhase>;
   runHandles: SubagentRunHandles | null;
+  childThreadId: string | null;
   recentActivity: ReadonlyArray<SubagentActivityEntry>;
   firstSeenAt: string;
   startedAt: string | null;
@@ -305,6 +308,7 @@ function getOrCreate(
     workflowName: asString(payload.workflowName) ?? null,
     phases: [],
     runHandles: null,
+    childThreadId: asString(payload.childThreadId) ?? null,
     recentActivity: [],
     firstSeenAt: at,
     startedAt: null,
@@ -356,6 +360,8 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): vo
   }
   const outputFile = asString(payload.outputFile);
   if (outputFile) agent.outputFile = outputFile;
+  const childThreadId = asString(payload.childThreadId);
+  if (childThreadId) agent.childThreadId = childThreadId;
   if (Array.isArray(payload.phases)) {
     const phases: SubagentWorkflowPhase[] = [];
     for (const entry of payload.phases) {
@@ -859,61 +865,6 @@ export function deriveAgentPanelModel({
     hasAgents: true,
     liveCount: runningCount + waitingCount,
   };
-}
-
-/**
- * Members ordered by urgency for the capped inline workflow card: running and
- * failed first, then waiting, then most recently updated.
- */
-export function workflowCardMembers(
-  group: AgentPanelWorkflowGroup,
-  limit: number,
-): { readonly visible: ReadonlyArray<RuntimeSubagent>; readonly overflow: number } {
-  const all = [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
-  const urgency = (agent: RuntimeSubagent): number => {
-    if (agent.status === "failed") return 0;
-    if (agent.status === "running") return 1;
-    if (agent.status === "waiting") return 2;
-    return 3;
-  };
-  const ordered = all
-    .slice()
-    .sort((a, b) => urgency(a) - urgency(b) || b.updatedAt.localeCompare(a.updatedAt));
-  return {
-    visible: ordered.slice(0, limit),
-    overflow: Math.max(0, ordered.length - limit),
-  };
-}
-
-/** Kinds the timeline should not render as generic rows (fold input only). */
-export function isSubagentActivityKind(kind: string): boolean {
-  return (
-    kind === "task.started" ||
-    kind === "task.progress" ||
-    kind === "task.updated" ||
-    kind === "task.completed" ||
-    kind === "tool.progress"
-  );
-}
-
-/**
- * Quiet-timeline guarantee: tool rows attributed to an owning agent belong in
- * the Agents surface, not the parent chat. Unattributed rows must stay.
- */
-export function isAgentAttributedToolActivity(activity: OrchestrationThreadActivity): boolean {
-  if (typeof activity.payload !== "object" || activity.payload === null) {
-    return false;
-  }
-  const payload = activity.payload as Record<string, unknown>;
-  return typeof payload.agentId === "string" && payload.agentId.trim().length > 0;
-}
-
-/** Timeline-bypassing synthesized rows (Codex children, workflow members). */
-export function isTimelineBypassActivity(activity: OrchestrationThreadActivity): boolean {
-  if (typeof activity.payload !== "object" || activity.payload === null) {
-    return false;
-  }
-  return (activity.payload as Record<string, unknown>).timelineBypass === true;
 }
 
 /**

@@ -5,10 +5,6 @@ import {
   foldSubagentActivities,
   formatSubagentModelLabel,
   formatSubagentTokenCount,
-  isAgentAttributedToolActivity,
-  isSubagentActivityKind,
-  isTimelineBypassActivity,
-  workflowCardMembers,
 } from "./subagentRuntime.ts";
 
 let sequence = 0;
@@ -557,64 +553,6 @@ describe("deriveAgentPanelModel", () => {
   });
 });
 
-describe("workflowCardMembers", () => {
-  it("orders by urgency (failed, running, waiting) and reports overflow", () => {
-    const roster = fold([
-      activity("task.started", { taskId: "wf-1", taskType: "local_workflow" }),
-      ...[..."abcdefghij"].map((letter, index) =>
-        activity("task.progress", {
-          taskId: `wf-1:wf:${index}`,
-          title: `agent-${letter}`,
-          status: index === 3 ? "failed" : index < 3 ? "completed" : "running",
-          ...(index === 3 ? { error: "died" } : {}),
-          parentAgentId: "wf-1",
-          agentIndex: index,
-          phaseIndex: 0,
-          phaseTitle: "Work",
-        }),
-      ),
-    ]);
-    const model = deriveAgentPanelModel({ agents: roster });
-    const { visible, overflow } = workflowCardMembers(model.workflows[0]!, 8);
-    expect(visible).toHaveLength(8);
-    expect(overflow).toBe(2);
-    expect(visible[0]!.status).toBe("failed");
-    expect(visible.filter((agent) => agent.status === "completed").length).toBeLessThanOrEqual(2);
-  });
-});
-
-describe("timeline predicates", () => {
-  it("recognizes subagent activity kinds as fold input", () => {
-    for (const kind of [
-      "task.started",
-      "task.progress",
-      "task.updated",
-      "task.completed",
-      "tool.progress",
-    ]) {
-      expect(isSubagentActivityKind(kind)).toBe(true);
-    }
-    expect(isSubagentActivityKind("tool.completed")).toBe(false);
-  });
-
-  it("attributed tool rows are re-homed; unattributed rows stay in the timeline", () => {
-    expect(isAgentAttributedToolActivity(activity("tool.completed", { agentId: "task-1" }))).toBe(
-      true,
-    );
-    expect(isAgentAttributedToolActivity(activity("tool.completed", {}))).toBe(false);
-    expect(isAgentAttributedToolActivity(activity("tool.completed", { agentId: "  " }))).toBe(
-      false,
-    );
-  });
-
-  it("timelineBypass rows never render in the parent chat", () => {
-    expect(isTimelineBypassActivity(activity("task.progress", { timelineBypass: true }))).toBe(
-      true,
-    );
-    expect(isTimelineBypassActivity(activity("task.progress", {}))).toBe(false);
-  });
-});
-
 describe("formatSubagentTokenCount", () => {
   it("formats plain counters", () => {
     expect(formatSubagentTokenCount(950)).toBe("950");
@@ -684,6 +622,73 @@ describe("model and effort attribution", () => {
     expect(formatSubagentModelLabel("claude-opus-4-20250514", null)).toBe("opus-4");
     expect(formatSubagentModelLabel("gpt-5.6-sol", "low")).toBe("gpt-5.6-sol · low");
     expect(formatSubagentModelLabel(null, "high")).toBeNull();
+  });
+});
+
+describe("cross-provider rows", () => {
+  it("renders tokens, tools, and effort exactly like a native row and carries its thread", () => {
+    const rows = (extra: Record<string, unknown>) => [
+      activity("task.started", {
+        taskId: "task-x",
+        title: "Risk review",
+        role: "reviewer",
+        model: "gpt-5.6-sol",
+        effort: "high",
+        status: "running",
+        ...extra,
+      }),
+      activity("task.progress", {
+        taskId: "task-x",
+        usageSnapshot: true,
+        typedUsage: { totalTokens: 1200, toolUses: 2 },
+        ...extra,
+      }),
+      activity("task.progress", { taskId: "task-x", lastToolName: "Read", ...extra }),
+      activity("tool.progress", { taskId: "task-x", toolName: "Read" }),
+      activity("task.completed", {
+        taskId: "task-x",
+        status: "completed",
+        summary: "No risks found.",
+        typedUsage: { totalTokens: 2000, toolUses: 3 },
+        ...extra,
+      }),
+    ];
+    const native = fold(rows({}))[0]!;
+    const crossProvider = fold(
+      rows({
+        taskType: "cross_provider_agent",
+        timelineBypass: true,
+        childThreadId: "thread-child",
+        providerInstanceId: "codex",
+      }),
+    )[0]!;
+
+    expect(native.childThreadId).toBeNull();
+    expect(crossProvider.childThreadId).toBe("thread-child");
+    // Everything a row renders from is identical; only the timestamps differ
+    // because the fixture stamps each row as it is built.
+    const rendered = (agent: typeof native) => ({
+      title: agent.title,
+      role: agent.role,
+      model: agent.model,
+      effort: agent.effort,
+      status: agent.status,
+      activationCount: agent.activationCount,
+      usage: agent.usage,
+      progress: agent.progress,
+      lastToolName: agent.lastToolName,
+      result: agent.result,
+      error: agent.error,
+      recentActivity: agent.recentActivity.map((entry) => entry.summary),
+    });
+    expect(rendered(crossProvider)).toEqual(rendered(native));
+    expect(formatSubagentModelLabel(crossProvider.model, crossProvider.effort)).toBe(
+      "gpt-5.6-sol · high",
+    );
+    expect(crossProvider.usage).toEqual({ totalTokens: 2000, toolUses: 3 });
+    expect(crossProvider.lastToolName).toBe("Read");
+    expect(crossProvider.result).toBe("No risks found.");
+    expect(crossProvider.status).toBe("completed");
   });
 });
 

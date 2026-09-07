@@ -64,6 +64,9 @@ export function applyServerConfigProjection(
         config: {
           ...projection.config,
           providers: event.payload.providers,
+          ...(event.payload.crossProviderAgentRouteDefaults !== undefined
+            ? { crossProviderAgentRouteDefaults: event.payload.crossProviderAgentRouteDefaults }
+            : {}),
         },
         latestEvent: event,
         source: "live",
