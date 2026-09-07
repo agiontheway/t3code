@@ -45,7 +45,10 @@ import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import {
   applyOutputCap,
-  childTelemetryFromActivities,
+  EMPTY_CHILD_TELEMETRY,
+  foldChildTelemetry,
+  mergeChildTelemetry,
+  typedUsageFromTelemetry,
   CrossProviderAgentLive,
   crossProviderCallKey,
   evaluateCrossProviderChild,
@@ -513,40 +516,74 @@ describe("applyOutputCap", () => {
   });
 });
 
-describe("childTelemetryFromActivities", () => {
-  const row = (kind: string, payload: unknown): OrchestrationThreadActivity =>
-    ({
-      id: `a-${kind}`,
-      tone: "info",
-      kind,
-      summary: kind,
-      payload,
-      turnId: null,
-      createdAt: NOW,
-    }) as OrchestrationThreadActivity;
+describe("child telemetry fold", () => {
+  const fold = (rows: ReadonlyArray<{ kind: string; payload: unknown }>) =>
+    rows.reduce(foldChildTelemetry, EMPTY_CHILD_TELEMETRY);
 
-  it("reads cumulative tokens, counts tool uses, and prefers the provider tool name", () => {
-    const telemetry = childTelemetryFromActivities([
-      row("context-window.updated", { usedTokens: 900 }),
-      row("tool.started", { title: "Command run", data: { toolName: "Bash" } }),
-      row("context-window.updated", { usedTokens: 400, totalProcessedTokens: 1500 }),
-      row("tool.started", { title: "Ran command" }),
-      row("context-window.updated", { usedTokens: 100, totalProcessedTokens: 1200 }),
+  it("takes the provider's cumulative total only, never context occupancy", () => {
+    // Codex: the first response carries only `last` occupancy (total equals
+    // it, so the adapter omits totalProcessedTokens); later responses carry
+    // the thread-cumulative total even as occupancy shrinks after compaction.
+    const codex = fold([
+      { kind: "context-window.updated", payload: { usedTokens: 900, lastUsedTokens: 900 } },
+      {
+        kind: "context-window.updated",
+        payload: { usedTokens: 1400, lastUsedTokens: 1400, totalProcessedTokens: 2300 },
+      },
+      {
+        kind: "context-window.updated",
+        payload: { usedTokens: 400, lastUsedTokens: 400, totalProcessedTokens: 2700 },
+      },
     ]);
-    assert.deepEqual(telemetry, {
-      usage: { totalTokens: 1500, toolUses: 2 },
-      lastToolName: "Ran command",
-    });
+    assert.equal(codex.totalTokens, 2700);
+    assert.isUndefined(
+      fold([{ kind: "context-window.updated", payload: { usedTokens: 900 } }]).totalTokens,
+    );
+    // Claude: the result usage total_tokens accumulates across turns while
+    // usedTokens stays clamped to the window.
+    const claude = fold([
+      {
+        kind: "context-window.updated",
+        payload: {
+          usedTokens: 12000,
+          lastUsedTokens: 12000,
+          maxTokens: 200000,
+          totalProcessedTokens: 15000,
+        },
+      },
+      {
+        kind: "context-window.updated",
+        payload: { usedTokens: 13000, lastUsedTokens: 13000, maxTokens: 200000 },
+      },
+    ]);
+    assert.equal(claude.totalTokens, 15000);
   });
 
-  it("has no usage before any token report and honours a live tool floor", () => {
-    assert.deepEqual(childTelemetryFromActivities([], 3), {
-      usage: undefined,
-      lastToolName: undefined,
+  it("counts tool calls monotonically and prefers the provider tool name", () => {
+    const telemetry = fold([
+      { kind: "tool.started", payload: { title: "Command run", data: { toolName: "Bash" } } },
+      { kind: "tool.started", payload: { title: "Ran command" } },
+      { kind: "context-compaction", payload: {} },
+    ]);
+    assert.deepEqual(telemetry, {
+      totalTokens: undefined,
+      toolUses: 2,
+      lastToolName: "Ran command",
     });
+    assert.isUndefined(typedUsageFromTelemetry(telemetry));
     assert.deepEqual(
-      childTelemetryFromActivities([row("context-window.updated", { usedTokens: 10 })], 3).usage,
+      typedUsageFromTelemetry({ totalTokens: 10, toolUses: 3, lastToolName: undefined }),
       { totalTokens: 10, toolUses: 3 },
+    );
+  });
+
+  it("merges two observers field-wise by maximum", () => {
+    assert.deepEqual(
+      mergeChildTelemetry(
+        { totalTokens: 500, toolUses: 2, lastToolName: "Read" },
+        { totalTokens: undefined, toolUses: 4, lastToolName: undefined },
+      ),
+      { totalTokens: 500, toolUses: 4, lastToolName: "Read" },
     );
   });
 });
@@ -1208,81 +1245,119 @@ describe("CrossProviderAgentService", () => {
         const childId = ThreadId.make(handle.childId);
         const usageId = `task-usage:${ROOT}:${handle.taskId}`;
         const isUsageRow = (activity: OrchestrationThreadActivity) => activity.id === usageId;
+        const usageEvents = () =>
+          Effect.map(readThreadEvents(ROOT), (events) =>
+            events.filter(
+              (event) =>
+                event.type === "thread.activity-appended" && isUsageRow(event.payload.activity),
+            ),
+          );
 
-        // The first observation mirrors at once: cumulative tokens, no tools yet.
-        const first = yield* parentActivityAfter(
-          ROOT,
-          appendChildActivity(childId, "context-window.updated", {
-            usedTokens: 100,
-            totalProcessedTokens: 1200,
-          }),
-          isUsageRow,
-        );
-        assert.isTrue(Option.isSome(first));
-        assert.deepInclude(payloadOf(Option.getOrThrow(first)), {
-          taskId: handle.taskId,
-          usageSnapshot: true,
-          typedUsage: { totalTokens: 1200 },
-          effort: "high",
-          childThreadId: childId,
+        // A Codex first response reports only context occupancy: no total
+        // yet, so nothing is mirrored (the row keeps "— tok").
+        yield* appendChildActivity(childId, "context-window.updated", {
+          usedTokens: 900,
+          lastUsedTokens: 900,
+          maxTokens: 272000,
+          compactsAutomatically: true,
         });
+        // The first tool call mirrors at once: a tool line, still no usage row.
+        const firstTool = yield* parentActivityAfter(
+          ROOT,
+          appendChildActivity(childId, "tool.started", {
+            itemType: "command_execution",
+            title: "Ran command",
+          }),
+          (activity) => activity.kind === "tool.progress",
+        );
+        assert.deepEqual(payloadOf(Option.getOrThrow(firstTool)), {
+          taskId: handle.taskId,
+          toolName: "Ran command",
+        });
+        assert.equal((yield* usageEvents()).length, 0);
 
         // Everything inside the same second coalesces into one later mirror
-        // that carries only the latest state.
-        yield* appendChildActivity(childId, "tool.started", {
-          itemType: "command_execution",
-          title: "Command run",
-          data: { toolName: "Bash" },
-        });
+        // carrying only the latest state: the cumulative total and the
+        // monotonic tool count.
         yield* appendChildActivity(childId, "context-window.updated", {
-          usedTokens: 300,
-          totalProcessedTokens: 2000,
+          usedTokens: 1400,
+          lastUsedTokens: 1400,
+          totalProcessedTokens: 2300,
+          maxTokens: 272000,
+          compactsAutomatically: true,
         });
         yield* appendChildActivity(childId, "tool.started", {
           itemType: "file_change",
           title: "File change",
           data: { toolName: "Read" },
         });
-        const usageEventsBefore = (yield* readThreadEvents(ROOT)).filter(
-          (event) =>
-            event.type === "thread.activity-appended" && isUsageRow(event.payload.activity),
-        ).length;
-        assert.equal(usageEventsBefore, 1);
-        const toolRow = yield* parentActivityAfter(
+        yield* appendChildActivity(childId, "context-window.updated", {
+          usedTokens: 400,
+          lastUsedTokens: 400,
+          totalProcessedTokens: 2700,
+          maxTokens: 272000,
+          compactsAutomatically: true,
+        });
+        assert.equal((yield* usageEvents()).length, 0);
+        // The tool.progress row is the last one a mirror writes, so waiting
+        // on it means the whole mirror has landed.
+        const secondTool = yield* parentActivityAfter(
           ROOT,
           TestClock.adjust("1 second"),
           (activity) => activity.kind === "tool.progress",
         );
-        assert.deepEqual(payloadOf(Option.getOrThrow(toolRow)), {
+        assert.deepEqual(payloadOf(Option.getOrThrow(secondTool)), {
           taskId: handle.taskId,
           toolName: "Read",
         });
         const activities = yield* readActivities(ROOT);
-        const usage = activities.find(isUsageRow);
-        assert.deepEqual(payloadOf(usage).typedUsage, { totalTokens: 2000, toolUses: 2 });
-        const progress = activities.find(
-          (activity) => activity.id === `task-progress:${ROOT}:${handle.taskId}`,
+        assert.deepInclude(payloadOf(activities.find(isUsageRow)), {
+          taskId: handle.taskId,
+          usageSnapshot: true,
+          typedUsage: { totalTokens: 2700, toolUses: 2 },
+          effort: "high",
+          childThreadId: childId,
+        });
+        assert.deepInclude(
+          payloadOf(
+            activities.find((activity) => activity.id === `task-progress:${ROOT}:${handle.taskId}`),
+          ),
+          { lastToolName: "Read", agentKind: "agent" },
         );
-        assert.deepInclude(payloadOf(progress), { lastToolName: "Read", agentKind: "agent" });
         assert.equal(activities.filter((activity) => activity.kind === "tool.progress").length, 1);
-        const usageEvents = (yield* readThreadEvents(ROOT)).filter(
-          (event) =>
-            event.type === "thread.activity-appended" && isUsageRow(event.payload.activity),
-        );
-        assert.equal(usageEvents.length, 2);
+        assert.equal((yield* usageEvents()).length, 1);
 
         // Settlement carries the final cumulative usage on the completion row.
         yield* tick;
         yield* settleChild({ childId, turnId: "turn-1", text: "done" });
         const settled = yield* service.wait(ROOT, { childIds: [childId] });
         if (isCrossProviderAgentErrorOutput(settled)) return yield* Effect.die(settled.error.code);
-        const completed = (yield* readActivities(ROOT)).find(
-          (activity) => activity.kind === "task.completed",
+        assert.deepInclude(
+          payloadOf(
+            (yield* readActivities(ROOT)).find((activity) => activity.kind === "task.completed"),
+          ),
+          { status: "completed", typedUsage: { totalTokens: 2700, toolUses: 2 }, effort: "high" },
         );
-        assert.deepInclude(payloadOf(completed), {
-          status: "completed",
-          typedUsage: { totalTokens: 2000, toolUses: 2 },
-          effort: "high",
+
+        // A follow-up's watcher seeds from an exact count of the child's tool
+        // calls, so the count keeps climbing instead of restarting at zero.
+        yield* tick;
+        const followed = yield* service.followUp(ROOT, { childId, prompt: "more" });
+        if (isCrossProviderAgentErrorOutput(followed))
+          return yield* Effect.die(followed.error.code);
+        yield* tick;
+        const thirdTool = yield* parentActivityAfter(
+          ROOT,
+          appendChildActivity(childId, "tool.started", {
+            itemType: "command_execution",
+            title: "Ran command",
+          }),
+          (activity) => activity.kind === "tool.progress",
+        );
+        assert.isTrue(Option.isSome(thirdTool));
+        assert.deepEqual(payloadOf((yield* readActivities(ROOT)).find(isUsageRow)).typedUsage, {
+          totalTokens: 2700,
+          toolUses: 3,
         });
       }).pipe(Effect.provide(makeLayer())),
   );

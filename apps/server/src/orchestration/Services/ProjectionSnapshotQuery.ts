@@ -198,6 +198,12 @@ export interface ProjectionSnapshotQueryShape {
     toTurnCount: number,
   ) => Effect.Effect<Option.Option<ProjectionFullThreadDiffContext>, ProjectionRepositoryError>;
 
+  /** Exact number of persisted activities of one kind on a thread (not bounded by the detail window). */
+  readonly countThreadActivitiesByKind: (input: {
+    readonly threadId: ThreadId;
+    readonly kind: string;
+  }) => Effect.Effect<number, ProjectionRepositoryError>;
+
   /**
    * Read a single active thread shell row by id.
    */

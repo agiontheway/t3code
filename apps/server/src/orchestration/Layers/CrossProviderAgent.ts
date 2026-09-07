@@ -85,10 +85,10 @@ const MAX_SUMMARY_CHARS = 200;
 /** Parent-row telemetry is coalesced to at most one mirror per child per interval. */
 export const PROGRESS_MIRROR_INTERVAL_MS = 1000;
 /** Child-thread activities that carry the telemetry a native row would show. */
-const CHILD_TELEMETRY_ACTIVITY_KINDS: ReadonlyArray<string> = [
+const CHILD_TELEMETRY_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   "context-window.updated",
   "tool.started",
-];
+]);
 
 const fail = (error: CrossProviderAgentError): CrossProviderAgentErrorOutput => ({ error });
 const isThreadId = Schema.is(ThreadId);
@@ -259,30 +259,37 @@ export function resolveCrossProviderEffort(input: {
   };
   readonly target: { readonly driver: ProviderDriverKind; readonly model: ServerProviderModel };
 }):
-  | { readonly optionId: string; readonly effort: string | undefined }
+  | { readonly selection: { readonly id: string; readonly value: string } | undefined }
   | { readonly unsupported: ReadonlyArray<string> } {
-  const optionId = crossProviderAgentEffortOptionId(input.target.driver) ?? "effort";
+  const optionId = crossProviderAgentEffortOptionId(input.target.driver);
   const descriptor = effortDescriptor(input.target.model, optionId);
   const choices = descriptor?.options.map((choice) => choice.id) ?? [];
   const explicit = input.explicit?.trim();
   if (explicit !== undefined && explicit.length > 0) {
-    return choices.includes(explicit) ? { optionId, effort: explicit } : { unsupported: choices };
+    return optionId !== undefined && choices.includes(explicit)
+      ? { selection: { id: optionId, value: explicit } }
+      : { unsupported: choices };
   }
-  if (descriptor === undefined) return { optionId, effort: undefined };
+  if (optionId === undefined || descriptor === undefined) return { selection: undefined };
   const inherited = effectiveThreadEffort(input.parent);
   if (inherited !== undefined && choices.includes(inherited)) {
-    return { optionId, effort: inherited };
+    return { selection: { id: optionId, value: inherited } };
   }
   const fallback = getProviderOptionCurrentValue(descriptor);
-  return { optionId, effort: typeof fallback === "string" ? fallback : undefined };
+  return {
+    selection: typeof fallback === "string" ? { id: optionId, value: fallback } : undefined,
+  };
 }
 
-/** The effort a child was created with; the option id is the target driver's. */
-function childEffort(modelSelection: ModelSelection): string | undefined {
-  return (
-    getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
-    getModelSelectionStringOptionValue(modelSelection, "effort")
-  );
+/** The effort a child was created with, read under its own driver's option id. */
+function childEffort(
+  driver: ProviderDriverKind | undefined,
+  modelSelection: ModelSelection,
+): string | undefined {
+  const optionId = driver === undefined ? undefined : crossProviderAgentEffortOptionId(driver);
+  return optionId === undefined
+    ? undefined
+    : getModelSelectionStringOptionValue(modelSelection, optionId);
 }
 
 function finiteCount(value: unknown): number | undefined {
@@ -303,44 +310,85 @@ function toolNameFromActivity(payload: unknown): string | undefined {
   );
 }
 
+/**
+ * What a child has reported so far. `totalTokens` is the provider's own
+ * cumulative processed count and stays undefined until one has been
+ * reported (the row shows "— tok" rather than a wrong number); `toolUses`
+ * is a monotonic count of the child's tool calls.
+ */
 export interface CrossProviderChildTelemetry {
-  readonly usage: RuntimeTaskUsage | undefined;
+  readonly totalTokens: number | undefined;
+  readonly toolUses: number;
   readonly lastToolName: string | undefined;
 }
 
+export const EMPTY_CHILD_TELEMETRY: CrossProviderChildTelemetry = {
+  totalTokens: undefined,
+  toolUses: 0,
+  lastToolName: undefined,
+};
+
 /**
- * A child's telemetry, read from its own retained activities: cumulative
- * tokens from `context-window.updated` (`totalProcessedTokens`, else the
- * context size) and tool uses from `tool.started`. Cumulative by
- * construction, so the parent row's max-merge never shrinks. `toolUsesFloor`
- * carries a live count past the retained-activity window.
+ * The cumulative token count on a `context-window.updated` activity. Only
+ * `totalProcessedTokens` qualifies: Codex fills it from the thread's
+ * cumulative `total` usage and Claude from the SDK result's cumulative
+ * `total_tokens`, both only once it exceeds the current context size.
+ * `usedTokens` is context occupancy (it shrinks on compaction) and is never
+ * a row total.
  */
-export function childTelemetryFromActivities(
-  activities: ReadonlyArray<OrchestrationThreadActivity>,
-  toolUsesFloor = 0,
+export function processedTokensFromActivity(payload: unknown): number | undefined {
+  return Predicate.isObject(payload) ? finiteCount(payload.totalProcessedTokens) : undefined;
+}
+
+/** Fold one child activity into the telemetry; unrelated kinds pass through. */
+export function foldChildTelemetry(
+  current: CrossProviderChildTelemetry,
+  activity: Pick<OrchestrationThreadActivity, "kind" | "payload">,
 ): CrossProviderChildTelemetry {
-  let totalTokens: number | undefined;
-  let toolUses = 0;
-  let lastToolName: string | undefined;
-  for (const activity of activities) {
-    if (activity.kind === "context-window.updated" && Predicate.isObject(activity.payload)) {
-      const total =
-        finiteCount(activity.payload.totalProcessedTokens) ??
-        finiteCount(activity.payload.usedTokens);
-      if (total !== undefined) totalTokens = Math.max(totalTokens ?? 0, total);
-    } else if (activity.kind === "tool.started") {
-      toolUses += 1;
-      lastToolName = toolNameFromActivity(activity.payload) ?? lastToolName;
-    }
+  if (activity.kind === "context-window.updated") {
+    const total = processedTokensFromActivity(activity.payload);
+    return total === undefined
+      ? current
+      : { ...current, totalTokens: Math.max(current.totalTokens ?? 0, Math.round(total)) };
   }
-  toolUses = Math.max(toolUses, toolUsesFloor);
+  if (activity.kind === "tool.started") {
+    return {
+      ...current,
+      toolUses: current.toolUses + 1,
+      lastToolName: toolNameFromActivity(activity.payload) ?? current.lastToolName,
+    };
+  }
+  return current;
+}
+
+/** Field-wise maximum, so two observers of the same child agree. */
+export function mergeChildTelemetry(
+  a: CrossProviderChildTelemetry,
+  b: CrossProviderChildTelemetry,
+): CrossProviderChildTelemetry {
+  const totalTokens =
+    a.totalTokens === undefined
+      ? b.totalTokens
+      : b.totalTokens === undefined
+        ? a.totalTokens
+        : Math.max(a.totalTokens, b.totalTokens);
   return {
-    usage:
-      totalTokens === undefined
-        ? undefined
-        : { totalTokens: Math.round(totalTokens), ...(toolUses > 0 ? { toolUses } : {}) },
-    lastToolName,
+    totalTokens,
+    toolUses: Math.max(a.toolUses, b.toolUses),
+    lastToolName: a.lastToolName ?? b.lastToolName,
   };
+}
+
+/** The row's `typedUsage`; absent until the provider has reported a cumulative total. */
+export function typedUsageFromTelemetry(
+  telemetry: CrossProviderChildTelemetry,
+): RuntimeTaskUsage | undefined {
+  return telemetry.totalTokens === undefined
+    ? undefined
+    : {
+        totalTokens: telemetry.totalTokens,
+        ...(telemetry.toolUses > 0 ? { toolUses: telemetry.toolUses } : {}),
+      };
 }
 
 const toolInputDecoders = Object.fromEntries(
@@ -512,31 +560,56 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       });
     });
 
-  /** Identity fields repeated on every Direct Spawns row for this child. */
-  const rowLinkage = (child: OrchestrationThreadShell) => ({
-    taskId: child.spawn!.taskId,
-    taskType: CROSS_PROVIDER_AGENT_TASK_TYPE,
-    agentKind: classifyTaskAgentKind({ taskType: CROSS_PROVIDER_AGENT_TASK_TYPE }),
-    title: child.title,
-    role: CROSS_PROVIDER_AGENT_ROLE,
-    model: child.modelSelection.model,
-    ...(childEffort(child.modelSelection) !== undefined
-      ? { effort: childEffort(child.modelSelection) }
-      : {}),
-    timelineBypass: true,
-    childThreadId: child.id,
-    providerInstanceId: child.modelSelection.instanceId,
-  });
-
-  const readChildTelemetry = (childId: ThreadId, toolUsesFloor: number) =>
+  const driverOf = (instanceId: ProviderInstanceId) =>
     Effect.map(
-      projection.getThreadDetailById(childId, { activityKinds: CHILD_TELEMETRY_ACTIVITY_KINDS }),
-      (detail) =>
-        childTelemetryFromActivities(
-          Option.isSome(detail) ? detail.value.activities : [],
-          toolUsesFloor,
-        ),
+      providerRegistry.getProviders,
+      (providers) => providers.find((provider) => provider.instanceId === instanceId)?.driver,
     );
+
+  /** Identity fields repeated on every Direct Spawns row for this child. */
+  const rowLinkage = (child: OrchestrationThreadShell) =>
+    Effect.map(driverOf(child.modelSelection.instanceId), (driver) => {
+      const effort = childEffort(driver, child.modelSelection);
+      return {
+        taskId: child.spawn!.taskId,
+        taskType: CROSS_PROVIDER_AGENT_TASK_TYPE,
+        agentKind: classifyTaskAgentKind({ taskType: CROSS_PROVIDER_AGENT_TASK_TYPE }),
+        title: child.title,
+        role: CROSS_PROVIDER_AGENT_ROLE,
+        model: child.modelSelection.model,
+        ...(effort !== undefined ? { effort } : {}),
+        timelineBypass: true,
+        childThreadId: child.id,
+        providerInstanceId: child.modelSelection.instanceId,
+      };
+    });
+
+  /**
+   * The child's telemetry from the projection: the latest reported
+   * cumulative total (the server retains only the newest context-window
+   * row per turn, so this read is small) and an exact COUNT of its tool
+   * calls, never the bounded detail window. Used once to seed a watcher and
+   * once at settlement.
+   */
+  const readChildTelemetry = (childId: ThreadId) =>
+    Effect.gen(function* () {
+      const detail = yield* projection.getThreadDetailById(childId, {
+        activityKinds: ["context-window.updated"],
+      });
+      const toolUses = yield* projection.countThreadActivitiesByKind({
+        threadId: childId,
+        kind: "tool.started",
+      });
+      const fromActivities = (Option.isSome(detail) ? detail.value.activities : []).reduce(
+        foldChildTelemetry,
+        EMPTY_CHILD_TELEMETRY,
+      );
+      return {
+        ...fromActivities,
+        toolUses,
+        lastToolName: undefined,
+      } satisfies CrossProviderChildTelemetry;
+    });
 
   /**
    * Mirror a settled child onto its parent's row exactly once per turn: the
@@ -546,14 +619,17 @@ const makeCrossProviderAgent = Effect.gen(function* () {
   const mirrorSettlement = (
     child: OrchestrationThreadShell,
     status: CrossProviderChildStatus,
-    toolUsesFloor = 0,
+    observed: CrossProviderChildTelemetry = EMPTY_CHILD_TELEMETRY,
   ) =>
     Effect.gen(function* () {
       if (!status.settled || child.spawn === undefined) return;
       const detail = yield* projection.getThreadDetailById(child.id, { activityKinds: [] });
       const output = Option.isSome(detail) ? finalAssistantText(detail.value, status.turnId) : "";
       const summary = boundedSummary(output);
-      const telemetry = yield* readChildTelemetry(child.id, toolUsesFloor);
+      const typedUsage = typedUsageFromTelemetry(
+        mergeChildTelemetry(yield* readChildTelemetry(child.id), observed),
+      );
+      const linkage = yield* rowLinkage(child);
       const completedStatus =
         status.state === "completed"
           ? "completed"
@@ -568,10 +644,10 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         kind: "task.completed",
         summary: `Cross-provider agent ${completedStatus}`,
         payload: {
-          ...rowLinkage(child),
+          ...linkage,
           status: completedStatus,
           ...(summary ? { summary } : {}),
-          ...(telemetry.usage ? { typedUsage: telemetry.usage } : {}),
+          ...(typedUsage ? { typedUsage } : {}),
           ...(status.state === "error" && child.session?.lastError
             ? { error: child.session.lastError }
             : {}),
@@ -608,48 +684,36 @@ const makeCrossProviderAgent = Effect.gen(function* () {
     });
 
   interface ProgressMirrorState {
+    readonly parentThreadId: ThreadId;
+    readonly taskId: RuntimeTaskId;
+    /** Row identity captured at seed time; settlement re-reads the shell. */
+    readonly linkage: Record<string, unknown>;
+    telemetry: CrossProviderChildTelemetry;
     dirty: boolean;
     lastFlushMs: number;
     lastSequence: number;
-    toolUsesFloor: number;
-    mirroredTotalTokens: number | undefined;
-    mirroredToolUses: number | undefined;
-    mirroredToolName: string | undefined;
+    mirrored: CrossProviderChildTelemetry;
     fiber: Fiber.Fiber<void> | null;
   }
 
-  const newProgressState = (): ProgressMirrorState => ({
-    dirty: false,
-    lastFlushMs: Number.NEGATIVE_INFINITY,
-    lastSequence: 0,
-    toolUsesFloor: 0,
-    mirroredTotalTokens: undefined,
-    mirroredToolUses: undefined,
-    mirroredToolName: undefined,
-    fiber: null,
-  });
-
   /**
-   * Mirror the child's current telemetry onto its parent row with the same
-   * stable activity ids ingestion gives native rows. The command id carries
-   * the last child event folded in, so a repeated flush replays its receipt.
+   * Dispatch the child's current telemetry onto its parent row with the same
+   * stable activity ids ingestion gives native rows; nothing is read here.
+   * Command ids embed the last child event folded in, so two flushes of the
+   * same state replay one receipt, and a later flush with new events writes
+   * a new command that the stable activity id then upserts into place.
    */
   const flushProgress = (childId: ThreadId, state: ProgressMirrorState) =>
     Effect.gen(function* () {
-      const shell = yield* readShell(childId);
-      if (Option.isNone(shell)) return;
-      const child = shell.value;
-      const spawn = child.spawn;
-      if (spawn === undefined) return;
-      const parentThreadId = spawn.parentThreadId;
-      const taskId = spawn.taskId;
-      const telemetry = yield* readChildTelemetry(childId, state.toolUsesFloor);
+      const { parentThreadId, taskId, linkage, telemetry } = state;
+      let mirrored = false;
       const mint = (op: string) =>
         CommandId.make(`server:xp-agent:${op}:${parentThreadId}:${childId}:${state.lastSequence}`);
+      const typedUsage = typedUsageFromTelemetry(telemetry);
       if (
-        telemetry.usage !== undefined &&
-        (telemetry.usage.totalTokens !== state.mirroredTotalTokens ||
-          telemetry.usage.toolUses !== state.mirroredToolUses)
+        typedUsage !== undefined &&
+        (telemetry.totalTokens !== state.mirrored.totalTokens ||
+          telemetry.toolUses !== state.mirrored.toolUses)
       ) {
         yield* appendParentActivity({
           parentThreadId,
@@ -657,14 +721,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           activityId: `task-usage:${parentThreadId}:${taskId}`,
           kind: "task.progress",
           summary: "Task usage updated",
-          payload: { ...rowLinkage(child), usageSnapshot: true, typedUsage: telemetry.usage },
+          payload: { ...linkage, usageSnapshot: true, typedUsage },
         });
-        state.mirroredTotalTokens = telemetry.usage.totalTokens;
-        state.mirroredToolUses = telemetry.usage.toolUses;
+        mirrored = true;
       }
       if (
         telemetry.lastToolName !== undefined &&
-        telemetry.lastToolName !== state.mirroredToolName
+        telemetry.lastToolName !== state.mirrored.lastToolName
       ) {
         yield* appendParentActivity({
           parentThreadId,
@@ -672,7 +735,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           activityId: `task-progress:${parentThreadId}:${taskId}`,
           kind: "task.progress",
           summary: `Cross-provider agent used ${telemetry.lastToolName}`,
-          payload: { ...rowLinkage(child), lastToolName: telemetry.lastToolName },
+          payload: { ...linkage, lastToolName: telemetry.lastToolName },
         });
         yield* appendParentActivity({
           parentThreadId,
@@ -682,8 +745,10 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           summary: telemetry.lastToolName,
           payload: { taskId, toolName: telemetry.lastToolName },
         });
-        state.mirroredToolName = telemetry.lastToolName;
+        mirrored = true;
       }
+      state.mirrored = telemetry;
+      return mirrored;
     });
 
   /**
@@ -703,6 +768,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         const events = yield* engine.subscribeDomainEvents;
         const pending = new Set<string>(childIds);
         const statuses = new Map<ThreadId, CrossProviderChildStatus>();
+        const shells = new Map<ThreadId, OrchestrationThreadShell>();
         const progress = new Map<ThreadId, ProgressMirrorState>();
         const refresh = (childId: ThreadId) =>
           Effect.gen(function* () {
@@ -711,6 +777,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               pending.delete(childId);
               return;
             }
+            shells.set(childId, shell.value);
             const status = evaluateCrossProviderChild(shell.value);
             if (status.settled && !(yield* settledOutputReadable(childId, status))) {
               return;
@@ -721,8 +788,26 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               const state = progress.get(childId);
               progress.delete(childId);
               if (state?.fiber) yield* Fiber.interrupt(state.fiber);
-              yield* mirrorSettlement(shell.value, status, state?.toolUsesFloor ?? 0);
+              yield* mirrorSettlement(shell.value, status, state?.telemetry);
             }
+          });
+        /** One projection read per child at watcher start; everything after folds from events. */
+        const seed = (childId: ThreadId) =>
+          Effect.gen(function* () {
+            const shell = shells.get(childId);
+            if (shell === undefined || shell.spawn === undefined) return;
+            const telemetry = yield* readChildTelemetry(childId);
+            progress.set(childId, {
+              parentThreadId: shell.spawn.parentThreadId,
+              taskId: shell.spawn.taskId,
+              linkage: yield* rowLinkage(shell),
+              telemetry,
+              dirty: false,
+              lastFlushMs: Number.NEGATIVE_INFINITY,
+              lastSequence: 0,
+              mirrored: telemetry,
+              fiber: null,
+            });
           });
         // One scheduler per child: the first event mirrors at once, later
         // ones wait out the interval and mirror the latest state. The final
@@ -740,9 +825,12 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               }
               state.dirty = false;
               // A settlement interrupt waits for an in-flight mirror rather
-              // than cutting a parent dispatch short.
-              yield* Effect.uninterruptible(flushProgress(childId, state));
-              state.lastFlushMs = yield* Clock.currentTimeMillis;
+              // than cutting a parent dispatch short. Only a flush that wrote
+              // something starts the interval: an event that changed nothing
+              // visible must not delay the next real mirror.
+              if (yield* Effect.uninterruptible(flushProgress(childId, state))) {
+                state.lastFlushMs = yield* Clock.currentTimeMillis;
+              }
               if (!state.dirty) {
                 state.fiber = null;
                 return;
@@ -769,16 +857,15 @@ const makeCrossProviderAgent = Effect.gen(function* () {
             if (event.type === "thread.activity-appended") {
               if (options?.mirrorProgress !== true) return;
               const childId = event.payload.threadId;
-              const kind = event.payload.activity.kind;
-              if (!pending.has(childId) || !CHILD_TELEMETRY_ACTIVITY_KINDS.includes(kind)) return;
-              let state = progress.get(childId);
-              if (state === undefined) {
-                state = newProgressState();
-                progress.set(childId, state);
+              const activity = event.payload.activity;
+              if (!pending.has(childId) || !CHILD_TELEMETRY_ACTIVITY_KINDS.has(activity.kind)) {
+                return;
               }
+              const state = progress.get(childId);
+              if (state === undefined) return;
+              state.telemetry = foldChildTelemetry(state.telemetry, activity);
               state.dirty = true;
               state.lastSequence = Math.max(state.lastSequence, event.sequence);
-              if (kind === "tool.started") state.toolUsesFloor += 1;
               if (state.fiber === null) {
                 state.fiber = yield* Effect.forkScoped(runScheduler(childId, state));
               }
@@ -790,6 +877,11 @@ const makeCrossProviderAgent = Effect.gen(function* () {
             }
           });
         yield* Effect.forEach(childIds, refresh, { discard: true });
+        if (options?.mirrorProgress === true) {
+          yield* Effect.forEach([...pending], (childId) => seed(ThreadId.make(childId)), {
+            discard: true,
+          });
+        }
         if (pending.size > 0) {
           const drain = events.pipe(
             Stream.mapEffect(observe),
@@ -981,9 +1073,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           modelSelection: {
             instanceId: targetInstanceId,
             model: input.model,
-            ...(effort.effort !== undefined
-              ? { options: [{ id: effort.optionId, value: effort.effort }] }
-              : {}),
+            ...(effort.selection !== undefined ? { options: [effort.selection] } : {}),
           },
           runtimeMode: parent.runtimeMode,
           interactionMode: parent.interactionMode,
@@ -1010,7 +1100,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           commandId: startedCommandId,
           kind: "task.started",
           summary: `Cross-provider agent started on ${target?.displayName ?? targetInstanceId}`,
-          payload: { ...rowLinkage(child.value), status: "running" },
+          payload: { ...(yield* rowLinkage(child.value)), status: "running" },
         });
         yield* engine.dispatch({
           type: "thread.turn.start",
@@ -1032,7 +1122,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           childThreadId: childId,
           providerInstanceId: targetInstanceId,
           model: input.model,
-          effort: effort.effort ?? null,
+          effort: effort.selection?.value ?? null,
           depth: childDepth,
           allowOrchestration,
         });
@@ -1180,7 +1270,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           commandId: runningCommandId,
           kind: "task.updated",
           summary: "Cross-provider agent follow-up started",
-          payload: { ...rowLinkage(child), status: "running" },
+          payload: { ...(yield* rowLinkage(child)), status: "running" },
         });
         yield* watchSettlement(child.id);
         return { childId: child.id, status: "running" as const };

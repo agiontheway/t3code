@@ -869,6 +869,18 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const countThreadActivityRowsByKind = SqlSchema.findOne({
+    Request: Schema.Struct({ threadId: ThreadId, kind: Schema.String }),
+    Result: Schema.Struct({ count: Schema.Number }),
+    execute: ({ threadId, kind }) =>
+      sql`
+        SELECT COUNT(*) AS "count"
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND kind = ${kind}
+      `,
+  });
+
   const readEventReplayStats = SqlSchema.findOne({
     Request: EventReplayStatsInput,
     Result: EventReplayStatsRowSchema,
@@ -2705,6 +2717,19 @@ pending_approval_requests AS (
     };
   });
 
+  const countThreadActivitiesByKind: ProjectionSnapshotQueryShape["countThreadActivitiesByKind"] = (
+    input,
+  ) =>
+    countThreadActivityRowsByKind(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.countThreadActivitiesByKind:query",
+          "ProjectionSnapshotQuery.countThreadActivitiesByKind:decodeRow",
+        ),
+      ),
+      Effect.map((row) => row.count),
+    );
+
   const getActiveProjectByWorkspaceRoot: ProjectionSnapshotQueryShape["getActiveProjectByWorkspaceRoot"] =
     (workspaceRoot) =>
       getActiveProjectRowByWorkspaceRoot({ workspaceRoot }).pipe(
@@ -3425,6 +3450,7 @@ pending_approval_requests AS (
     getImportedAgentSessionSources,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
+    countThreadActivitiesByKind,
     getThreadShellById,
     getThreadRuntimeContext,
     getTurnStartMessage,

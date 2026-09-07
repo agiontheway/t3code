@@ -21,25 +21,36 @@ export const CROSS_PROVIDER_AGENT_TOOL_NAMES = [
 export type CrossProviderAgentToolName = (typeof CROSS_PROVIDER_AGENT_TOOL_NAMES)[number];
 
 /** Drivers that may act as cross-provider callers and targets. */
-export const CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS: ReadonlyArray<ProviderDriverKind> = [
-  ProviderDriverKind.make("claudeAgent"),
-  ProviderDriverKind.make("codex"),
-];
+export const CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS = ["claudeAgent", "codex"] as const;
+export type CrossProviderAgentSupportedDriverKind =
+  (typeof CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS)[number];
+export const CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS: ReadonlyArray<ProviderDriverKind> =
+  CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS.map((kind) => ProviderDriverKind.make(kind));
+
+export function isCrossProviderAgentSupportedDriverKind(
+  driver: string,
+): driver is CrossProviderAgentSupportedDriverKind {
+  return (CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS as ReadonlyArray<string>).includes(driver);
+}
 
 /**
  * The `modelSelection.options` id each supported driver reads its reasoning
  * effort from (Claude: `effort`, Codex: `reasoningEffort`). A child's
  * resolved effort is stored under the target driver's id so the adapter
- * applies it exactly as it would a user-selected one.
+ * applies it exactly as it would a user-selected one. Keyed by the supported
+ * driver union so adding a driver forces a decision here.
  */
-export const CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS: Readonly<Record<string, string>> = {
+export const CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS: Readonly<
+  Record<CrossProviderAgentSupportedDriverKind, string>
+> = {
   claudeAgent: "effort",
   codex: "reasoningEffort",
 };
 
 export function crossProviderAgentEffortOptionId(driver: ProviderDriverKind): string | undefined {
-  return Object.prototype.hasOwnProperty.call(CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS, driver)
-    ? CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS[driver]
+  const kind: string = driver;
+  return isCrossProviderAgentSupportedDriverKind(kind)
+    ? CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS[kind]
     : undefined;
 }
 

@@ -1413,6 +1413,10 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "orchestration" },
           ),
+        // Matches never include spawned (cross-provider child) threads; the
+        // query excludes them server-side. Clients must only use matches to
+        // decorate thread lists that are already filtered the same way,
+        // never as a standalone list of threads.
         [ORCHESTRATION_WS_METHODS.searchThreads]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.searchThreads,
