@@ -114,7 +114,7 @@ Provider-neutral. Depends on `OrchestrationEngineService`, `ProjectionSnapshotQu
 
 Operations (all take `callerThreadId`):
 
-- `catalog()` → eligible routes from current settings ∩ enabled ∩ authenticated ∩ supported drivers (`claudeAgent`, `codex`). Excludes the caller's own instance? **No** — include it but mark `isCallerInstance: true`; `spawn` rejects it.
+- `catalog()` → eligible routes from current settings ∩ enabled ∩ installed ∩ available ∩ not explicitly `unauthenticated` ∩ supported drivers (`claudeAgent`, `codex`). API-key-backed instances report `auth.status` `unknown`, not `authenticated`, and are eligible; `instance_unauthenticated` fires only for an explicit `unauthenticated` status. Excludes the caller's own instance? **No** — include it but mark `isCallerInstance: true`; `spawn` rejects it.
 - `spawn({ providerInstanceId, model, prompt, title?, allowOrchestration })`:
   1. Validate access enabled, route eligible, model offered by that exact instance, caller depth + 1 ≤ cap (and `< cap` if `allowOrchestration`), target ≠ caller instance.
   2. Read the parent `OrchestrationThread`; copy `projectId`, `worktreePath`, `branch`, `runtimeMode`, `interactionMode`.

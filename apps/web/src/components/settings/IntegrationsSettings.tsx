@@ -1227,6 +1227,7 @@ function CrossProviderAgentAccessSetting() {
 
 const CROSS_PROVIDER_AGENT_MAX_DEPTH_LIMIT = 5;
 const CROSS_PROVIDER_AGENT_OUTPUT_CAP_STEP = 500;
+const CROSS_PROVIDER_AGENT_OUTPUT_CAP_LIMIT = 200_000;
 
 function CrossProviderAgentMaxDepthSetting() {
   const maxDepth = usePrimarySettings((settings) => settings.crossProviderAgentMaxDepth);
@@ -1300,6 +1301,7 @@ function CrossProviderAgentOutputCapSetting() {
         <NumberField
           value={cap}
           min={MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS}
+          max={CROSS_PROVIDER_AGENT_OUTPUT_CAP_LIMIT}
           step={CROSS_PROVIDER_AGENT_OUTPUT_CAP_STEP}
           format={NO_GROUPING}
           size="sm"
@@ -1307,9 +1309,9 @@ function CrossProviderAgentOutputCapSetting() {
           onValueCommitted={(value) => {
             if (value === null || !Number.isFinite(value)) return;
             updateSettings({
-              crossProviderAgentOutputCapChars: Math.max(
-                MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS,
-                Math.round(value),
+              crossProviderAgentOutputCapChars: Math.min(
+                CROSS_PROVIDER_AGENT_OUTPUT_CAP_LIMIT,
+                Math.max(MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS, Math.round(value)),
               ),
             });
           }}
@@ -1325,7 +1327,7 @@ function CrossProviderAgentOutputCapSetting() {
 
 /**
  * Route editor. An empty stored map means the server-generated defaults
- * (every enabled, signed-in Claude and Codex instance, all of its models),
+ * (every enabled Claude and Codex instance that is not signed out, all of its models),
  * which is what the collapsed list shows until the user edits it. Restore
  * defaults writes the empty map back, so the defaults keep tracking the
  * provider catalogs instead of freezing a copy.
@@ -1368,7 +1370,7 @@ function CrossProviderAgentRoutesSetting() {
     <SettingsRow
       serverScoped
       {...searchableSetting("cross-provider-agent-routes")}
-      description="Which provider instances and models agents may target. Generated from your enabled, signed-in Claude and Codex instances until you edit them."
+      description="Which provider instances and models agents may target. Generated from your enabled Claude and Codex instances (signed-out ones excluded) until you edit them."
       status={edited ? "Edited" : undefined}
       control={
         <Button
@@ -1394,7 +1396,7 @@ function CrossProviderAgentRoutesSetting() {
           <div className="space-y-2 border-t border-border/50 px-3 py-3 sm:px-4">
             {view.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No enabled, signed-in Claude or Codex instance can be a target yet.
+                No enabled Claude or Codex instance can be a target yet.
               </p>
             ) : (
               <div className="overflow-hidden rounded-lg border border-border/60">
@@ -1474,8 +1476,8 @@ function CrossProviderAgentRoutesSetting() {
               Replace your route edits with the generated defaults?
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Every enabled, signed-in Claude and Codex instance becomes a target again with all of
-              its models. Your per-instance and per-model choices are discarded.
+              Every enabled Claude and Codex instance that is not signed out becomes a target again
+              with all of its models. Your per-instance and per-model choices are discarded.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

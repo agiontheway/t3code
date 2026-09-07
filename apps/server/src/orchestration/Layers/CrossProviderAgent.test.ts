@@ -54,6 +54,7 @@ import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQu
 const CLAUDE = ProviderInstanceId.make("claudeAgent");
 const CODEX = ProviderInstanceId.make("codex");
 const CODEX_WORK = ProviderInstanceId.make("codex-work");
+const CODEX_API_KEY = ProviderInstanceId.make("codex-openrouter");
 const CURSOR = ProviderInstanceId.make("cursor");
 const PROJECT_ID = ProjectId.make("project-xp");
 const ROOT = ThreadId.make("thread-root");
@@ -89,6 +90,8 @@ const DEFAULT_PROVIDERS: ReadonlyArray<ServerProvider> = [
   provider(CLAUDE, "claudeAgent", ["claude-haiku-4-5", "claude-fable-5-1"]),
   provider(CODEX, "codex", ["gpt-5.6-sol", "gpt-5.6-luna"]),
   provider(CODEX_WORK, "codex", ["gpt-5.6-sol"], { auth: { status: "unauthenticated" } }),
+  // API-key backed: current T3 reports these as `unknown`, never `authenticated`.
+  provider(CODEX_API_KEY, "codex", ["glm-5.3-flash"], { auth: { status: "unknown" } }),
   provider(CURSOR, "cursor", ["composer-1"]),
 ];
 
@@ -467,6 +470,7 @@ describe("CrossProviderAgentService", () => {
         [
           [CLAUDE, true],
           [CODEX, false],
+          [CODEX_API_KEY, false],
         ],
       );
       assert.deepEqual(
@@ -477,6 +481,13 @@ describe("CrossProviderAgentService", () => {
       assert.equal(output.maxDepth, 2);
       assert.equal(output.callerDepth, 0);
       assert.isFalse(output.routes.some((route) => route.providerInstanceId === CODEX_WORK));
+      // An API-key instance is spawnable; only an explicit sign-out excludes one.
+      const apiKeyChild = yield* service.spawn(ROOT, {
+        providerInstanceId: CODEX_API_KEY,
+        model: "glm-5.3-flash",
+        prompt: "use the key-backed instance",
+      });
+      assert.isFalse(isCrossProviderAgentErrorOutput(apiKeyChild));
     }).pipe(Effect.provide(makeLayer())),
   );
 

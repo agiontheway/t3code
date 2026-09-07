@@ -18,14 +18,19 @@ export interface CrossProviderAgentResolvedRoute {
   readonly models: ReadonlyArray<string>;
 }
 
-/** Instances a route can be generated for: supported driver, enabled, installed, authenticated. */
+/**
+ * Instances a route can be generated for: supported driver, available,
+ * enabled, installed, and not explicitly signed out. API-key-backed instances
+ * (an OpenRouter-backed Codex instance, for example) report `unknown` rather
+ * than `authenticated`, and they are legitimate targets.
+ */
 export function isCrossProviderAgentCandidate(provider: ServerProvider): boolean {
   return (
     CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS.includes(provider.driver) &&
     isProviderAvailable(provider) &&
     provider.enabled &&
     provider.installed &&
-    provider.auth.status === "authenticated"
+    provider.auth.status !== "unauthenticated"
   );
 }
 

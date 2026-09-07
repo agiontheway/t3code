@@ -562,7 +562,7 @@ export const ServerConfig = Schema.Struct({
   observability: ServerObservability,
   settings: ServerSettings,
   /**
-   * Server-derived generated cross-provider routes (every enabled, signed-in
+   * Server-derived generated cross-provider routes (every enabled, not signed-out
    * Claude/Codex instance, all models). Clients render and materialise from
    * this, never from their own provider snapshot. Absent on older servers.
    */

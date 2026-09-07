@@ -562,11 +562,11 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           target !== undefined &&
           CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS.includes(target.driver) &&
           target.enabled &&
-          target.auth.status !== "authenticated"
+          target.auth.status === "unauthenticated"
         ) {
           return fail({
             code: "instance_unauthenticated",
-            message: "That provider instance is not signed in.",
+            message: "That provider instance is signed out.",
             providerInstanceId: targetInstanceId,
           });
         }
