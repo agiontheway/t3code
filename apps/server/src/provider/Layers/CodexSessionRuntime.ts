@@ -47,10 +47,18 @@ import {
   readCrossProviderAgentToolHost,
   type CrossProviderToolSpec,
 } from "../CrossProviderAgentToolHost.ts";
+import {
+  clearCrossProviderToolsGranted,
+  markCrossProviderToolsGranted,
+} from "../crossProviderToolGrants.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 /** Parallel dynamic tool calls a single session may have in flight. */
 const DYNAMIC_TOOL_CALL_CONCURRENCY = 16;
+
+/** Posted in the thread when a tool-granted Codex thread had to be resumed. */
+export const CODEX_RESUMED_WITHOUT_TOOLS_NOTICE =
+  "Cross-provider agent tools are not available on a resumed Codex session; start a new thread to use them.";
 
 export function toCodexDynamicToolSpec(
   spec: CrossProviderToolSpec,
@@ -730,6 +738,12 @@ const decodeV2ThreadStartResponse = Schema.decodeUnknownEffect(
   EffectCodexSchema.V2ThreadStartResponse,
 );
 
+export interface CodexThreadOpened {
+  readonly opened: CodexThreadOpenResponse;
+  /** `resumed` means the app server kept the old thread, so no `dynamicTools` reached it. */
+  readonly mode: "started" | "resumed";
+}
+
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
   readonly threadId: ThreadId;
@@ -740,7 +754,7 @@ export const openCodexThread = (input: {
   readonly resumeThreadId: string | undefined;
   /** Granted only on `thread/start`; a resumed Codex thread never carries tools. */
   readonly dynamicTools?: ReadonlyArray<EffectCodexSchema.ClientRequest__DynamicToolSpec>;
-}): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
+}): Effect.Effect<CodexThreadOpened, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
     cwd: input.cwd,
@@ -751,9 +765,9 @@ export const openCodexThread = (input: {
   const dynamicTools = input.dynamicTools;
   // Suspended so the start request is only issued when actually taken (fresh
   // start, or the fallback after a recoverable resume failure).
-  const startThread: Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> =
+  const startThread: Effect.Effect<CodexThreadOpened, CodexErrors.CodexAppServerError> =
     Effect.suspend(() =>
-      dynamicTools !== undefined && dynamicTools.length > 0
+      (dynamicTools !== undefined && dynamicTools.length > 0
         ? input.client.raw
             .request("thread/start", {
               ...startParams,
@@ -772,7 +786,8 @@ export const openCodexThread = (input: {
                 ),
               ),
             )
-        : input.client.request("thread/start", startParams),
+        : input.client.request("thread/start", startParams)
+      ).pipe(Effect.map((opened): CodexThreadOpened => ({ opened, mode: "started" }))),
     );
 
   if (resumeThreadId === undefined) {
@@ -785,6 +800,7 @@ export const openCodexThread = (input: {
       ...startParams,
     })
     .pipe(
+      Effect.map((opened): CodexThreadOpened => ({ opened, mode: "resumed" })),
       Effect.catchIf(isRecoverableThreadResumeError, (error) =>
         Effect.logWarning("codex app-server thread resume fell back to fresh start", {
           threadId: input.threadId,
@@ -1241,6 +1257,8 @@ export const makeCodexSessionRuntime = (
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
+    /** Completed by interrupt and close so an in-flight dynamic tool call is released. */
+    const turnInterruptedRef = yield* Ref.make(yield* Deferred.make<void>());
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -2016,7 +2034,28 @@ export const makeCodexSessionRuntime = (
               success: false,
             } satisfies EffectCodexSchema.DynamicToolCallResponse;
           }
-          const result = yield* host.call(options.threadId, payload.tool, payload.arguments);
+          // A blocking call (agent_wait) must not outlive the turn: the
+          // interrupt Deferred wins the race and the app server, which has
+          // already abandoned the turn, receives a failed result.
+          const interrupted = yield* Ref.get(turnInterruptedRef);
+          const outcome = yield* Effect.raceFirst(
+            host
+              .call(options.threadId, payload.tool, payload.arguments)
+              .pipe(Effect.map((result) => ({ _tag: "result" as const, result }))),
+            Deferred.await(interrupted).pipe(Effect.as({ _tag: "interrupted" as const })),
+          );
+          const result =
+            outcome._tag === "result"
+              ? outcome.result
+              : {
+                  output: {
+                    error: {
+                      code: "internal",
+                      message: "The turn was interrupted before the tool call finished.",
+                    },
+                  },
+                  isError: true,
+                };
           return {
             contentItems: [
               { type: "inputText", text: encodeCrossProviderToolOutput(result.output) },
@@ -2351,7 +2390,7 @@ export const makeCodexSessionRuntime = (
         ? yield* crossProviderToolHost.toolsForThread(options.threadId)
         : Option.none<ReadonlyArray<CrossProviderToolSpec>>();
 
-      const opened = yield* openCodexThread({
+      const { opened, mode } = yield* openCodexThread({
         client,
         threadId: options.threadId,
         runtimeMode: options.runtimeMode,
@@ -2363,6 +2402,16 @@ export const makeCodexSessionRuntime = (
           ? { dynamicTools: crossProviderTools.value.map(toCodexDynamicToolSpec) }
           : {}),
       });
+      if (Option.isSome(crossProviderTools) && mode === "started") {
+        markCrossProviderToolsGranted(options.threadId);
+      } else {
+        clearCrossProviderToolsGranted(options.threadId);
+      }
+      if (Option.isSome(crossProviderTools) && mode === "resumed") {
+        // Codex accepts dynamicTools on thread/start only; a resumed thread
+        // silently runs without them, so say so where the user can see it.
+        yield* emitSessionEvent("session/warning", CODEX_RESUMED_WITHOUT_TOOLS_NOTICE);
+      }
 
       const providerThreadId = opened.thread.id;
       const session = {
@@ -2395,6 +2444,8 @@ export const makeCodexSessionRuntime = (
       }
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
+      yield* Deferred.succeed(yield* Ref.get(turnInterruptedRef), undefined);
+      clearCrossProviderToolsGranted(options.threadId);
       yield* updateSession(sessionRef, {
         status: "closed",
         activeTurnId: undefined,
@@ -2445,6 +2496,7 @@ export const makeCodexSessionRuntime = (
             // has even if the setting changed after the session started.
             browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
           });
+          yield* Ref.set(turnInterruptedRef, yield* Deferred.make<void>());
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
             Effect.mapError((error) =>
@@ -2501,6 +2553,7 @@ export const makeCodexSessionRuntime = (
           if (!effectiveTurnId) {
             return;
           }
+          yield* Deferred.succeed(yield* Ref.get(turnInterruptedRef), undefined);
           yield* client.request("turn/interrupt", {
             threadId: providerThreadId,
             turnId: effectiveTurnId,

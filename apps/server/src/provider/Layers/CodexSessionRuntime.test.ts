@@ -813,7 +813,7 @@ describe("openCodexThread", () => {
         raw: { request: () => Effect.die("raw path unused") },
       };
 
-      const opened = yield* openCodexThread({
+      const { opened, mode } = yield* openCodexThread({
         client,
         threadId: ThreadId.make("thread-1"),
         runtimeMode: "full-access",
@@ -824,6 +824,7 @@ describe("openCodexThread", () => {
       });
 
       NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.equal(mode, "started");
       NodeAssert.deepStrictEqual(
         calls.map((call) => call.method),
         ["thread/resume", "thread/start"],
@@ -898,7 +899,7 @@ describe("openCodexThread", () => {
         },
       ];
 
-      const opened = yield* openCodexThread({
+      const { opened, mode } = yield* openCodexThread({
         client,
         threadId: ThreadId.make("thread-1"),
         runtimeMode: "full-access",
@@ -910,6 +911,7 @@ describe("openCodexThread", () => {
       });
 
       NodeAssert.equal(opened.thread.id, "raw-thread");
+      NodeAssert.equal(mode, "started");
       NodeAssert.deepStrictEqual(typedCalls, []);
       NodeAssert.equal(rawCalls.length, 1);
       NodeAssert.equal(rawCalls[0]?.method, "thread/start");
@@ -953,7 +955,7 @@ describe("openCodexThread", () => {
         },
       ];
 
-      const opened = yield* openCodexThread({
+      const { opened, mode } = yield* openCodexThread({
         client,
         threadId: ThreadId.make("thread-1"),
         runtimeMode: "full-access",
@@ -965,6 +967,7 @@ describe("openCodexThread", () => {
       });
 
       NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.equal(mode, "started");
       NodeAssert.deepStrictEqual(
         typedCalls.map((call) => call.method),
         ["thread/resume"],

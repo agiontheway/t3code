@@ -14,6 +14,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import { ThreadId } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
@@ -27,7 +28,11 @@ import {
   setCrossProviderAgentToolHost,
   type CrossProviderToolSpec,
 } from "../CrossProviderAgentToolHost.ts";
-import { makeCodexSessionRuntime } from "./CodexSessionRuntime.ts";
+import { hasCrossProviderToolsGranted } from "../crossProviderToolGrants.ts";
+import {
+  CODEX_RESUMED_WITHOUT_TOOLS_NOTICE,
+  makeCodexSessionRuntime,
+} from "./CodexSessionRuntime.ts";
 
 const ROOT = wireFixture.rootThreadId;
 const THREAD_ID = ThreadId.make("thread-xp-dynamic-tools");
@@ -117,12 +122,14 @@ describe("CodexSessionRuntime dynamic tools integration", () => {
       );
 
       yield* runtime.start();
+      assert.isTrue(hasCrossProviderToolsGranted(THREAD_ID));
       yield* runtime.sendTurn({ input: "list the routes" });
       yield* Fiber.join(turnCompleted);
       // Sidecars are read before `close`, which tears down the test scope.
       const recordedRequests = readJsonLines(`${scriptPath}.requests`);
       const recordedResponses = readJsonLines(`${scriptPath}.responses`);
       yield* runtime.close;
+      assert.isFalse(hasCrossProviderToolsGranted(THREAD_ID));
 
       assert.deepEqual(calls, [{ threadId: THREAD_ID, tool: "agent_catalog", args: {} }]);
 
@@ -179,6 +186,7 @@ describe("CodexSessionRuntime dynamic tools integration", () => {
         environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
       });
       yield* runtime.start();
+      assert.isFalse(hasCrossProviderToolsGranted(THREAD_ID));
       const recordedRequests = readJsonLines(`${scriptPath}.requests`);
       yield* runtime.close;
 
@@ -187,6 +195,205 @@ describe("CodexSessionRuntime dynamic tools integration", () => {
       ) as { params: Record<string, unknown> } | undefined;
       assert.isDefined(threadStart);
       assert.notProperty(threadStart.params, "dynamicTools");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("resumes without dynamicTools and posts the visible notice", () =>
+    Effect.gen(function* () {
+      setCrossProviderAgentToolHost({
+        toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+        call: () => Effect.succeed({ output: {}, isError: false }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+
+      const script = {
+        rootThreadId: ROOT,
+        recordRequests: true,
+        recordThreadStart: true,
+        notifications: [],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      NodeFS.rmSync(`${scriptPath}.requests`, { force: true });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const suffix of ["", ".requests"]) {
+            NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+          }
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: THREAD_ID,
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        resumeCursor: { threadId: ROOT },
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const notice = yield* runtime.events.pipe(
+        Stream.filter((event) => event.kind === "session" && event.method === "session/warning"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      assert.isFalse(hasCrossProviderToolsGranted(THREAD_ID));
+      const [warning] = Array.from(yield* Fiber.join(notice));
+      assert.equal(warning?.message, CODEX_RESUMED_WITHOUT_TOOLS_NOTICE);
+      const recordedRequests = readJsonLines(`${scriptPath}.requests`) as Array<{
+        method: string;
+        params: Record<string, unknown>;
+      }>;
+      yield* runtime.close;
+
+      assert.deepEqual(
+        recordedRequests.map((entry) => entry.method),
+        ["thread/resume"],
+      );
+      assert.notProperty(recordedRequests[0]!.params, "dynamicTools");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("releases an in-flight tool call when the turn is interrupted", () =>
+    Effect.gen(function* () {
+      const callStarted = yield* Deferred.make<void>();
+      setCrossProviderAgentToolHost({
+        toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+        // A blocking agent_wait that would never return on its own.
+        call: () => Deferred.succeed(callStarted, undefined).pipe(Effect.andThen(Effect.never)),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+
+      const script = {
+        rootThreadId: ROOT,
+        holdTurnOpen: true,
+        completeTurnOnServerResponse: true,
+        notifications: [],
+        serverRequests: [
+          {
+            id: 4102,
+            method: "item/tool/call",
+            params: {
+              threadId: ROOT,
+              turnId: wireFixture.responses.turnStart.turn.id,
+              callId: "call-xp-wait",
+              tool: "agent_wait",
+              arguments: { childIds: ["child-1"] },
+            },
+          },
+        ],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      NodeFS.rmSync(`${scriptPath}.responses`, { force: true });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const suffix of ["", ".responses", ".interrupts"]) {
+            NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+          }
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: THREAD_ID,
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const turnCompleted = yield* runtime.events.pipe(
+        Stream.filter((event) => event.method === "turn/completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "wait for the child" });
+      yield* Deferred.await(callStarted);
+      yield* runtime.interruptTurn();
+      // The peer completes the turn only once it receives our tool response.
+      yield* Fiber.join(turnCompleted);
+      const recordedResponses = readJsonLines(`${scriptPath}.responses`) as Array<{
+        id: number;
+        result: { success: boolean; contentItems: Array<{ text: string }> };
+      }>;
+      yield* runtime.close;
+
+      assert.equal(recordedResponses.length, 1);
+      assert.equal(recordedResponses[0]!.id, 4102);
+      assert.equal(recordedResponses[0]!.result.success, false);
+      assert.include(recordedResponses[0]!.result.contentItems[0]!.text, "interrupted");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("fails closed when a tool call arrives for a thread that was not granted tools", () =>
+    Effect.gen(function* () {
+      const calls: Array<string> = [];
+      setCrossProviderAgentToolHost({
+        toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+        call: (_threadId, tool) =>
+          Effect.sync(() => {
+            calls.push(tool);
+            return { output: {}, isError: false };
+          }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+
+      const script = {
+        rootThreadId: ROOT,
+        holdTurnOpen: true,
+        completeTurnOnServerResponse: true,
+        notifications: [],
+        serverRequests: [
+          {
+            id: 4103,
+            method: "item/tool/call",
+            params: {
+              threadId: "some-collab-child-thread",
+              turnId: wireFixture.responses.turnStart.turn.id,
+              callId: "call-xp-stale",
+              tool: "agent_catalog",
+              arguments: {},
+            },
+          },
+        ],
+      };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      NodeFS.rmSync(`${scriptPath}.responses`, { force: true });
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          for (const suffix of ["", ".responses"]) {
+            NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+          }
+        }),
+      );
+
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: THREAD_ID,
+        binaryPath: peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "full-access",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      const turnCompleted = yield* runtime.events.pipe(
+        Stream.filter((event) => event.method === "turn/completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* runtime.start();
+      yield* runtime.sendTurn({ input: "stale call" });
+      yield* Fiber.join(turnCompleted);
+      const recordedResponses = readJsonLines(`${scriptPath}.responses`) as Array<{
+        result: { success: boolean; contentItems: Array<{ text: string }> };
+      }>;
+      yield* runtime.close;
+
+      assert.deepEqual(calls, []);
+      assert.equal(recordedResponses[0]!.result.success, false);
+      assert.include(recordedResponses[0]!.result.contentItems[0]!.text, "unsupported_caller");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

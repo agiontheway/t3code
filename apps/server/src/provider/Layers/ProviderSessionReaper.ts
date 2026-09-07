@@ -12,6 +12,7 @@ import {
   type ProviderSessionReaperShape,
 } from "../Services/ProviderSessionReaper.ts";
 import { forkParked } from "../../serverActivation.ts";
+import { hasCrossProviderToolsGranted } from "../crossProviderToolGrants.ts";
 import { ProviderService } from "../Services/ProviderService.ts";
 
 const DEFAULT_INACTIVITY_THRESHOLD_MS = 30 * 60 * 1000;
@@ -56,6 +57,17 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
 
         const idleDurationMs = now - lastSeenMs;
         if (idleDurationMs < inactivityThresholdMs) {
+          continue;
+        }
+
+        // Codex grants cross-provider agent tools at thread/start only, so a
+        // reaped session would resume without them. Keep it alive.
+        if (hasCrossProviderToolsGranted(binding.threadId)) {
+          yield* Effect.logDebug("provider.session.reaper.skipped-cross-provider-tools", {
+            threadId: binding.threadId,
+            provider: binding.provider,
+            idleDurationMs,
+          });
           continue;
         }
 

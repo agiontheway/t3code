@@ -1740,6 +1740,33 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps session warnings to runtime.warning so the notice reaches the thread", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-session-warning"),
+        kind: "session",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "session/warning",
+        message: "Cross-provider agent tools are not available on a resumed Codex session.",
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "runtime.warning") {
+        return NodeAssert.fail("expected a runtime.warning event");
+      }
+      NodeAssert.equal(
+        firstEvent.value.payload.message,
+        "Cross-provider agent tools are not available on a resumed Codex session.",
+      );
+    }),
+  );
+
   it.effect("maps process stderr notifications to runtime.warning", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
