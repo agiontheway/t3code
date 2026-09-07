@@ -21,6 +21,9 @@ import {
   DEFAULT_BROWSER_VIEWPORT,
   DEFAULT_PREVIEW_APPEARANCE,
   DEFAULT_PREVIEW_ZOOM_FACTOR,
+  DEFAULT_UNIFIED_SETTINGS,
+  MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS,
+  type ProviderInstanceId,
   FILL_PREVIEW_VIEWPORT,
   PREVIEW_VIEWPORT_MAX_AREA,
   PREVIEW_VIEWPORT_MAX_DIMENSION,
@@ -34,8 +37,9 @@ import {
   type PreviewViewportSetting,
 } from "@t3tools/contracts";
 import { PREVIEW_VIEWPORT_PRESETS } from "@t3tools/shared/previewViewport";
+import { useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
-import { InfoIcon, MoreVertical, Plus as PlusIcon } from "lucide-react";
+import { ChevronRightIcon, InfoIcon, MoreVertical, Plus as PlusIcon } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { ScreenRotationIcon } from "~/browser/ScreenRotationIcon";
@@ -43,6 +47,7 @@ import { resolveEnvironmentOptionLabel } from "~/components/BranchToolbar.logic"
 import { previewBridge } from "~/components/preview/previewBridge";
 import { cn, randomUUID } from "~/lib/utils";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
+import { primaryServerProvidersAtom } from "~/state/server";
 import { isElectron } from "../../env";
 
 import { Badge } from "../ui/badge";
@@ -68,6 +73,8 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { DraftInput } from "../ui/draft-input";
 import { NumberField, NumberFieldGroup, NumberFieldInput } from "../ui/number-field";
 import {
@@ -86,6 +93,8 @@ import {
   persistClientSettingsUpdate,
   useClientSettings,
   useClientSettingsHydrated,
+  usePrimarySettings,
+  usePrimarySettingsAvailable,
   useUpdatePrimarySettings,
 } from "~/hooks/useSettings";
 
@@ -98,6 +107,12 @@ import {
 import { searchableSetting } from "./settingsSearch";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
 import type { ImportOutcome } from "./browserImportWizard.logic";
+import {
+  hasCrossProviderRouteEdits,
+  setCrossProviderRouteEnabled,
+  setCrossProviderRouteModel,
+  viewCrossProviderRoutes,
+} from "./crossProviderAgentSettings.logic";
 
 const FILL_VALUE = "fill";
 const RESPONSIVE_VALUE = "responsive";
@@ -1165,6 +1180,283 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
   );
 }
 
+/**
+ * Cross-provider agent tools. Every row is server-scoped: tool injection and
+ * route validation happen on the server at session start, so the answer
+ * must be the same from every client of the environment.
+ */
+function CrossProviderAgentAccessSetting() {
+  const enabled = usePrimarySettings((settings) => settings.enableCrossProviderAgentAccess);
+  const updateSettings = useUpdatePrimarySettings();
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("cross-provider-agent-access")}
+      description="Allow agents to start child threads on other configured providers. This may consume those providers' paid quota."
+      status={enabled ? "Applies to sessions started from now on." : undefined}
+      resetAction={
+        enabled !== DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess ? (
+          <SettingResetButton
+            label="cross-provider agent access"
+            onClick={() =>
+              updateSettings({
+                enableCrossProviderAgentAccess:
+                  DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Switch
+          checked={enabled}
+          onCheckedChange={(checked) =>
+            updateSettings({ enableCrossProviderAgentAccess: Boolean(checked) })
+          }
+          aria-label="Allow cross-provider agent access"
+        />
+      }
+    />
+  );
+}
+
+const CROSS_PROVIDER_AGENT_MAX_DEPTH_LIMIT = 5;
+const CROSS_PROVIDER_AGENT_OUTPUT_CAP_STEP = 500;
+
+function CrossProviderAgentMaxDepthSetting() {
+  const maxDepth = usePrimarySettings((settings) => settings.crossProviderAgentMaxDepth);
+  const updateSettings = useUpdatePrimarySettings();
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("cross-provider-agent-max-depth")}
+      description="How many levels of delegation a spawn may reach. 1 forbids sub-orchestrators; 2 lets a child fan out once more."
+      resetAction={
+        maxDepth !== DEFAULT_UNIFIED_SETTINGS.crossProviderAgentMaxDepth ? (
+          <SettingResetButton
+            label="max orchestration depth"
+            onClick={() =>
+              updateSettings({
+                crossProviderAgentMaxDepth: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentMaxDepth,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <NumberField
+          value={maxDepth}
+          min={1}
+          max={CROSS_PROVIDER_AGENT_MAX_DEPTH_LIMIT}
+          format={NO_GROUPING}
+          size="sm"
+          className="w-20"
+          onValueCommitted={(value) => {
+            if (value === null || !Number.isInteger(value)) return;
+            updateSettings({ crossProviderAgentMaxDepth: value });
+          }}
+        >
+          <NumberFieldGroup>
+            <NumberFieldInput aria-label="Max orchestration depth" />
+          </NumberFieldGroup>
+        </NumberField>
+      }
+    />
+  );
+}
+
+function CrossProviderAgentOutputCapSetting() {
+  const cap = usePrimarySettings((settings) => settings.crossProviderAgentOutputCapChars);
+  const updateSettings = useUpdatePrimarySettings();
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("cross-provider-agent-output-cap")}
+      description="Characters of a child's final answer returned to the parent in one piece. Longer answers come back as head and tail, marked truncated, with the rest available on request."
+      resetAction={
+        cap !== DEFAULT_UNIFIED_SETTINGS.crossProviderAgentOutputCapChars ? (
+          <SettingResetButton
+            label="child output cap"
+            onClick={() =>
+              updateSettings({
+                crossProviderAgentOutputCapChars:
+                  DEFAULT_UNIFIED_SETTINGS.crossProviderAgentOutputCapChars,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <NumberField
+          value={cap}
+          min={MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS}
+          step={CROSS_PROVIDER_AGENT_OUTPUT_CAP_STEP}
+          format={NO_GROUPING}
+          size="sm"
+          className="w-24"
+          onValueCommitted={(value) => {
+            if (value === null || !Number.isInteger(value)) return;
+            updateSettings({ crossProviderAgentOutputCapChars: value });
+          }}
+        >
+          <NumberFieldGroup>
+            <NumberFieldInput aria-label="Child output cap in characters" />
+          </NumberFieldGroup>
+        </NumberField>
+      }
+    />
+  );
+}
+
+/**
+ * Route editor. An empty stored map means the server-generated defaults
+ * (every enabled, signed-in Claude and Codex instance, all of its models),
+ * which is what the collapsed list shows until the user edits it. Restore
+ * defaults writes the empty map back, so the defaults keep tracking the
+ * provider catalogs instead of freezing a copy.
+ */
+function CrossProviderAgentRoutesSetting() {
+  const routes = usePrimarySettings((settings) => settings.crossProviderAgentRoutes);
+  const providers = useAtomValue(primaryServerProvidersAtom);
+  const updateSettings = useUpdatePrimarySettings();
+  const editable = usePrimarySettingsAvailable();
+  const [open, setOpen] = useState(false);
+  const [restoreOpen, setRestoreOpen] = useState(false);
+  const view = viewCrossProviderRoutes(routes, providers);
+  const edited = hasCrossProviderRouteEdits(routes);
+  const enabledCount = view.filter((route) => route.enabled).length;
+
+  return (
+    <SettingsRow
+      serverScoped
+      {...searchableSetting("cross-provider-agent-routes")}
+      description="Which provider instances and models agents may target. Generated from your enabled, signed-in Claude and Codex instances until you edit them."
+      status={edited ? "Edited" : undefined}
+      control={
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!edited || !editable}
+          onClick={() => setRestoreOpen(true)}
+        >
+          Restore defaults
+        </Button>
+      }
+    >
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <CollapsibleTrigger className="group flex min-h-9 w-full items-center gap-2 px-3 text-left sm:px-4">
+          <ChevronRightIcon className="size-4 text-muted-foreground transition-transform duration-200 group-data-panel-open:rotate-90" />
+          <span className="text-sm text-foreground">Routes</span>
+          <span className="text-xs text-muted-foreground">
+            {enabledCount} of {view.length} enabled
+          </span>
+        </CollapsibleTrigger>
+        <CollapsiblePanel>
+          <div className="space-y-2 border-t border-border/50 px-3 py-3 sm:px-4">
+            {view.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No enabled, signed-in Claude or Codex instance can be a target yet.
+              </p>
+            ) : (
+              <div className="overflow-hidden rounded-lg border border-border/60">
+                {view.map((route, index) => (
+                  <div
+                    key={route.providerInstanceId}
+                    className={cn("px-3 py-2", index > 0 && "border-t border-border/60")}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm text-foreground">{route.displayName}</div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {route.providerInstanceId} · {route.driver}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={route.enabled}
+                        disabled={!editable}
+                        onCheckedChange={(checked) =>
+                          updateSettings({
+                            crossProviderAgentRoutes: setCrossProviderRouteEnabled(
+                              routes,
+                              providers,
+                              route.providerInstanceId,
+                              Boolean(checked),
+                            ),
+                          })
+                        }
+                        aria-label={`Allow agents to target ${route.displayName}`}
+                      />
+                    </div>
+                    {route.enabled && route.catalog.length > 0 ? (
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+                        {route.catalog.map((model) => {
+                          const checked =
+                            route.selectedModels.length === 0 ||
+                            route.selectedModels.includes(model.slug);
+                          return (
+                            <label
+                              key={model.slug}
+                              className="flex items-center gap-2 text-xs text-foreground"
+                            >
+                              <Checkbox
+                                checked={checked}
+                                disabled={!editable}
+                                onCheckedChange={(next) =>
+                                  updateSettings({
+                                    crossProviderAgentRoutes: setCrossProviderRouteModel(
+                                      routes,
+                                      providers,
+                                      route.providerInstanceId as ProviderInstanceId,
+                                      model.slug,
+                                      Boolean(next),
+                                    ),
+                                  })
+                                }
+                                aria-label={`${model.name} on ${route.displayName}`}
+                              />
+                              <span className="truncate">{model.name}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </CollapsiblePanel>
+      </Collapsible>
+      <AlertDialog open={restoreOpen} onOpenChange={setRestoreOpen}>
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Replace your route edits with the generated defaults?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Every enabled, signed-in Claude and Codex instance becomes a target again with all of
+              its models. Your per-instance and per-model choices are discarded.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                updateSettings({ crossProviderAgentRoutes: {} });
+                setRestoreOpen(false);
+              }}
+            >
+              Restore defaults
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </SettingsRow>
+  );
+}
+
 export function IntegrationsSettingsPanel() {
   // Client-local preview defaults are editable only where the preview exists.
   const previewDefaultsDisabled = !isElectron;
@@ -1182,6 +1474,12 @@ export function IntegrationsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SettingsSection id="agents" title="Agents">
+        <CrossProviderAgentAccessSetting />
+        <CrossProviderAgentMaxDepthSetting />
+        <CrossProviderAgentOutputCapSetting />
+        <CrossProviderAgentRoutesSetting />
+      </SettingsSection>
       <SettingsSection id="browser" title="Browser">
         {/* Server-authoritative, so it stays editable on any client anchored to
             a server; `serverScoped` covers the hosted app, which has none. It
