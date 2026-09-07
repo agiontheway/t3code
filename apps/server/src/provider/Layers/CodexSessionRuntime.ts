@@ -1257,6 +1257,12 @@ export const makeCodexSessionRuntime = (
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
+    // The grant must not outlive the session on any exit path (crash,
+    // adapter scope close), or the reaper would exempt a dead session forever.
+    yield* Scope.addFinalizer(
+      runtimeScope,
+      Effect.sync(() => clearCrossProviderToolsGranted(options.threadId)),
+    );
     /** Completed by interrupt and close so an in-flight dynamic tool call is released. */
     const turnInterruptedRef = yield* Ref.make(yield* Deferred.make<void>());
 
@@ -2040,7 +2046,7 @@ export const makeCodexSessionRuntime = (
           const interrupted = yield* Ref.get(turnInterruptedRef);
           const outcome = yield* Effect.raceFirst(
             host
-              .call(options.threadId, payload.tool, payload.arguments)
+              .call(options.threadId, payload.tool, payload.arguments, payload.callId)
               .pipe(Effect.map((result) => ({ _tag: "result" as const, result }))),
             Deferred.await(interrupted).pipe(Effect.as({ _tag: "interrupted" as const })),
           );

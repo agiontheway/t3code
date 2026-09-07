@@ -31,6 +31,11 @@ import type { CrossProviderAgentToolHost } from "../../provider/CrossProviderAge
 
 export type CrossProviderAgentResult<Output> = Output | CrossProviderAgentErrorOutput;
 
+/** Provider-supplied identity of the invocation; see `CrossProviderAgentToolHost.call`. */
+export interface CrossProviderAgentCallOptions {
+  readonly callId?: string | undefined;
+}
+
 export interface CrossProviderAgentServiceShape extends CrossProviderAgentToolHost {
   readonly catalog: (
     callerThreadId: ThreadId,
@@ -38,6 +43,7 @@ export interface CrossProviderAgentServiceShape extends CrossProviderAgentToolHo
   readonly spawn: (
     callerThreadId: ThreadId,
     input: CrossProviderAgentSpawnInput,
+    options?: CrossProviderAgentCallOptions,
   ) => Effect.Effect<CrossProviderAgentResult<CrossProviderAgentSpawnOutput>>;
   readonly wait: (
     callerThreadId: ThreadId,
@@ -50,10 +56,12 @@ export interface CrossProviderAgentServiceShape extends CrossProviderAgentToolHo
   readonly followUp: (
     callerThreadId: ThreadId,
     input: CrossProviderAgentFollowUpInput,
+    options?: CrossProviderAgentCallOptions,
   ) => Effect.Effect<CrossProviderAgentResult<CrossProviderAgentFollowUpOutput>>;
   readonly interrupt: (
     callerThreadId: ThreadId,
     input: CrossProviderAgentInterruptInput,
+    options?: CrossProviderAgentCallOptions,
   ) => Effect.Effect<CrossProviderAgentResult<CrossProviderAgentInterruptOutput>>;
 }
 

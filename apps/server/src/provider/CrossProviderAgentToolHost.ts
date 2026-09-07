@@ -37,10 +37,17 @@ export interface CrossProviderAgentToolHost {
   readonly toolsForThread: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ReadonlyArray<CrossProviderToolSpec>>>;
+  /**
+   * `callId` is the provider's identity for this tool invocation (Codex
+   * `item/tool/call.callId`, the MCP request id for Claude). Mutating tools
+   * derive their command ids from it so a re-issued call replays instead of
+   * repeating the mutation. Omit it only when the provider offers none.
+   */
   readonly call: (
     threadId: ThreadId,
     tool: string,
     args: unknown,
+    callId?: string,
   ) => Effect.Effect<CrossProviderToolResult>;
 }
 

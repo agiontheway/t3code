@@ -73,11 +73,22 @@ export const CrossProviderAgentSpawnInput = Schema.Struct({
 });
 export type CrossProviderAgentSpawnInput = typeof CrossProviderAgentSpawnInput.Type;
 
+/** Bounds on one wait call; larger inputs fail with `invalid_input`. */
+export const CROSS_PROVIDER_AGENT_WAIT_MAX_CHILDREN = 32;
+export const CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS = 600;
+
 export const CrossProviderAgentWaitInput = Schema.Struct({
-  childIds: Schema.Array(ChildIdInput).annotate({ description: "Owned children to wait on." }),
+  childIds: Schema.Array(ChildIdInput)
+    .check(Schema.isMaxLength(CROSS_PROVIDER_AGENT_WAIT_MAX_CHILDREN))
+    .annotate({
+      description: `Owned children to wait on (at most ${CROSS_PROVIDER_AGENT_WAIT_MAX_CHILDREN}).`,
+    }),
   timeoutSeconds: Schema.optionalKey(
-    Schema.Finite.check(Schema.isGreaterThan(0)).annotate({
-      description: "Return unsettled entries after this many seconds instead of blocking.",
+    Schema.Finite.check(
+      Schema.isGreaterThan(0),
+      Schema.isLessThanOrEqualTo(CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS),
+    ).annotate({
+      description: `Return unsettled entries after this many seconds (max ${CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS}) instead of blocking.`,
     }),
   ),
 });

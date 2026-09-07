@@ -62,13 +62,13 @@ const peerPath = NodePath.join(
 describe("CodexSessionRuntime dynamic tools integration", () => {
   it.effect("sends dynamicTools on thread/start and answers item/tool/call", () =>
     Effect.gen(function* () {
-      const calls: Array<{ threadId: ThreadId; tool: string; args: unknown }> = [];
+      const calls: Array<{ threadId: ThreadId; tool: string; args: unknown; callId?: string }> = [];
       setCrossProviderAgentToolHost({
         toolsForThread: (threadId) =>
           Effect.succeed(threadId === THREAD_ID ? Option.some([CATALOG_SPEC]) : Option.none()),
-        call: (threadId, tool, args) =>
+        call: (threadId, tool, args, callId) =>
           Effect.sync(() => {
-            calls.push({ threadId, tool, args });
+            calls.push({ threadId, tool, args, ...(callId === undefined ? {} : { callId }) });
             return { output: { routes: [], callerDepth: 0 }, isError: false };
           }),
       });
@@ -131,7 +131,9 @@ describe("CodexSessionRuntime dynamic tools integration", () => {
       yield* runtime.close;
       assert.isFalse(hasCrossProviderToolsGranted(THREAD_ID));
 
-      assert.deepEqual(calls, [{ threadId: THREAD_ID, tool: "agent_catalog", args: {} }]);
+      assert.deepEqual(calls, [
+        { threadId: THREAD_ID, tool: "agent_catalog", args: {}, callId: "call-xp-1" },
+      ]);
 
       const threadStart = recordedRequests.find(
         (entry) => (entry as { method: string }).method === "thread/start",
@@ -195,6 +197,39 @@ describe("CodexSessionRuntime dynamic tools integration", () => {
       ) as { params: Record<string, unknown> } | undefined;
       assert.isDefined(threadStart);
       assert.notProperty(threadStart.params, "dynamicTools");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("clears the reaper exemption when the session scope closes without close()", () =>
+    Effect.gen(function* () {
+      setCrossProviderAgentToolHost({
+        toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+        call: () => Effect.succeed({ output: {}, isError: false }),
+      });
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const script = { rootThreadId: ROOT, notifications: [] };
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(scriptPath, { force: true })),
+      );
+
+      // The adapter tears a crashed session down by closing its scope; the
+      // runtime's own close() never runs on that path.
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const runtime = yield* makeCodexSessionRuntime({
+            threadId: THREAD_ID,
+            binaryPath: peerPath,
+            cwd: NodeOS.tmpdir(),
+            runtimeMode: "full-access",
+            environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+          });
+          yield* runtime.start();
+          assert.isTrue(hasCrossProviderToolsGranted(THREAD_ID));
+        }),
+      );
+      assert.isFalse(hasCrossProviderToolsGranted(THREAD_ID));
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 

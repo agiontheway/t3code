@@ -399,6 +399,67 @@ describe("ProviderRuntimeIngestion", () => {
     };
   }
 
+  it("settles the session only after the turn's buffered assistant text is finalized", async () => {
+    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: false } });
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("turn-finalize-first");
+    const base = { provider: ProviderDriverKind.make("codex"), threadId, turnId };
+    harness.emit({
+      ...base,
+      type: "turn.started",
+      eventId: asEventId("evt-ff-started"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    harness.emit({
+      ...base,
+      type: "content.delta",
+      eventId: asEventId("evt-ff-delta"),
+      itemId: asItemId("ff-text"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: { streamKind: "assistant_text", delta: "The whole answer." },
+    });
+    harness.emit({
+      ...base,
+      type: "turn.completed",
+      eventId: asEventId("evt-ff-completed"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      payload: { state: "completed" },
+    });
+    await harness.drain();
+
+    const head = await Effect.runPromise(harness.engine.latestSequence);
+    const events = Array.from(
+      await Effect.runPromise(
+        Stream.runCollect(
+          harness.engine.readThreadEvents({
+            threadId,
+            fromSequenceExclusive: 0,
+            toSequenceInclusive: head,
+          }),
+        ),
+      ),
+    );
+    const finalizedIndex = events.findIndex(
+      (event) =>
+        event.type === "thread.message-sent" &&
+        (event.payload as { role: string; streaming: boolean }).role === "assistant" &&
+        (event.payload as { streaming: boolean }).streaming === false,
+    );
+    // The harness seeds a ready session before the turn; the settle under
+    // test is the last ready session-set, after turn.completed.
+    const settledIndex = events.findLastIndex(
+      (event) =>
+        event.type === "thread.session-set" &&
+        (event.payload as { session: { status: string } }).session.status === "ready",
+    );
+    expect(finalizedIndex).toBeGreaterThanOrEqual(0);
+    expect(settledIndex).toBeGreaterThan(finalizedIndex);
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.messages).toEqual([
+      expect.objectContaining({ role: "assistant", text: "The whole answer.", streaming: false }),
+    ]);
+  });
+
   it("maps turn started/completed events into thread session updates", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

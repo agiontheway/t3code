@@ -2,6 +2,8 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { ThreadId } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 import { z } from "zod";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 
 import {
   encodeCrossProviderToolOutput,
@@ -120,12 +122,29 @@ export function buildClaudeInProcessToolServer(input: {
   readonly host: CrossProviderAgentToolHost;
   readonly runPromise: <A>(effect: import("effect/Effect").Effect<A>) => Promise<A>;
 }) {
+  // MCP request ids restart with every in-process server, so namespace them
+  // per server instance. The SDK transport never re-sends a request, so this
+  // identity only needs to be unique, not stable across a Claude retry (the
+  // SDK exposes no tool_use id to the handler).
+  const serverNonce = NodeCrypto.randomUUID();
   return createSdkMcpServer({
     name: CLAUDE_IN_PROCESS_SERVER_NAME,
     tools: input.specs.map((spec) =>
-      tool(spec.name, spec.description, zodShapeFromJsonSchema(spec.inputSchema), (args) =>
-        input.runPromise(input.host.call(input.threadId, spec.name, args)).then(toCallToolResult),
+      tool(spec.name, spec.description, zodShapeFromJsonSchema(spec.inputSchema), (args, extra) =>
+        input
+          .runPromise(
+            input.host.call(input.threadId, spec.name, args, mcpCallId(serverNonce, extra)),
+          )
+          .then(toCallToolResult),
       ),
     ),
   });
+}
+
+function mcpCallId(serverNonce: string, extra: unknown): string | undefined {
+  if (!Predicate.isObject(extra)) return undefined;
+  const requestId = extra.requestId;
+  return Predicate.isString(requestId) || Predicate.isNumber(requestId)
+    ? `${serverNonce}:${requestId}`
+    : undefined;
 }

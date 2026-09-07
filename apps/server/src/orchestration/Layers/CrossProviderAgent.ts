@@ -43,8 +43,11 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
   clearCrossProviderAgentToolHost,
   setCrossProviderAgentToolHost,
@@ -125,16 +128,56 @@ export function applyOutputCap(
   if (totalChars <= cap) {
     return { output: text, truncated: false, totalChars };
   }
-  const head = Math.floor(cap / 2);
-  const tail = cap - head;
+  const marker = (head: number, omitted: number) =>
+    `\n[… ${omitted} characters omitted; call agent_result with childId "${childId}", offset ${head}, limit ${omitted} to read them …]\n`;
+  // The marker is part of the returned string, so it comes out of the cap.
+  // Its length depends on the digits it prints; two passes settle that.
+  let budget = cap - marker(0, totalChars).length;
+  for (let pass = 0; pass < 2; pass += 1) {
+    const head = Math.max(0, Math.floor(budget / 2));
+    budget = cap - marker(head, totalChars - Math.max(0, budget)).length;
+  }
+  budget = Math.max(0, budget);
+  const head = Math.floor(budget / 2);
+  const tail = budget - head;
   const omitted = totalChars - head - tail;
   return {
-    output:
-      `${text.slice(0, head)}\n[… ${omitted} characters omitted; call agent_result with childId "${childId}", offset ${head}, limit ${omitted} to read them …]\n` +
-      text.slice(totalChars - tail),
+    output: `${text.slice(0, head)}${marker(head, omitted)}${text.slice(totalChars - tail)}`,
     truncated: true,
     totalChars,
   };
+}
+
+/**
+ * Deterministic identity for one tool invocation. Everything a mutating call
+ * creates (child thread id, message id, command ids) derives from it, so a
+ * provider re-issuing the same call replays through command receipts instead
+ * of creating a second child or turn. Without a provider call id there is
+ * nothing to key on and a fresh identity is minted.
+ */
+export function crossProviderCallKey(input: {
+  readonly callerThreadId: ThreadId;
+  readonly tool: string;
+  readonly callId: string;
+}): string {
+  return NodeCrypto.createHash("sha256")
+    .update(`${input.callerThreadId}\u0000${input.tool}\u0000${input.callId}`)
+    .digest("hex")
+    .slice(0, 32);
+}
+
+/** A UUID-shaped thread id from a call key, so ids look like every other thread's. */
+export function threadIdFromCallKey(key: string): ThreadId {
+  const hex = key.padEnd(32, "0").slice(0, 32);
+  return ThreadId.make(
+    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`,
+  );
+}
+
+/** ISO stamp strictly after `floor` so a follow-up never ties with the last started turn. */
+export function stampAfter(now: string, floor: string | null | undefined): string {
+  if (floor === undefined || floor === null || now > floor) return now;
+  return DateTime.formatIso(DateTime.add(DateTime.makeUnsafe(floor), { milliseconds: 1 }));
 }
 
 function boundedSummary(text: string): string | undefined {
@@ -171,8 +214,20 @@ const makeCrossProviderAgent = Effect.gen(function* () {
   const projection = yield* ProjectionSnapshotQuery;
   const providerRegistry = yield* ProviderRegistry;
   const settingsService = yield* ServerSettingsService;
+  const commandReceipts = yield* OrchestrationCommandReceiptRepository;
   const crypto = yield* Crypto.Crypto;
   const serviceScope = yield* Scope.Scope;
+
+  /**
+   * A call-derived command that already has an accepted receipt is a replay
+   * of a call whose response was lost. Answer it the same way as the first
+   * time instead of re-running lifecycle checks the mutation itself changed.
+   */
+  const alreadyAccepted = (commandId: CommandId) =>
+    Effect.map(
+      commandReceipts.getByCommandId({ commandId }),
+      (receipt) => Option.isSome(receipt) && receipt.value.status === "accepted",
+    );
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const uuid = crypto.randomUUIDv4;
@@ -346,16 +401,33 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       });
     });
 
-  /** Thread id of the events that can move a child toward settlement. */
+  /** Thread id of the events that can move a child toward a readable settlement. */
   const settlementEventThreadId = (event: OrchestrationEvent): ThreadId | undefined => {
     switch (event.type) {
       case "thread.session-set":
       case "thread.turn-diff-completed":
+      case "thread.message-sent":
         return event.payload.threadId;
       default:
         return undefined;
     }
   };
+
+  /**
+   * A settled turn whose assistant message is still streaming has not been
+   * finalized yet (ingestion completes it in the same handler that settles
+   * the session); reading now would return partial text.
+   */
+  const settledOutputReadable = (childId: ThreadId, status: CrossProviderChildStatus) =>
+    Effect.gen(function* () {
+      if (!status.settled || status.turnId === null) return true;
+      const detail = yield* projection.getThreadDetailById(childId, { activityKinds: [] });
+      if (Option.isNone(detail)) return true;
+      return !detail.value.messages.some(
+        (message) =>
+          message.role === "assistant" && message.turnId === status.turnId && message.streaming,
+      );
+    });
 
   /**
    * Subscribe first, then read: any settlement committed before the read is
@@ -378,6 +450,9 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               return;
             }
             const status = evaluateCrossProviderChild(shell.value);
+            if (status.settled && !(yield* settledOutputReadable(childId, status))) {
+              return;
+            }
             statuses.set(childId, status);
             if (status.settled) {
               pending.delete(childId);
@@ -441,7 +516,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       }),
     );
 
-  const spawn: CrossProviderAgentServiceShape["spawn"] = (callerThreadId, input) =>
+  /** Identity for a mutating call: the provider's call id when given, else fresh. */
+  const callIdentity = (callerThreadId: ThreadId, tool: string, callId: string | undefined) =>
+    callId === undefined
+      ? Effect.map(uuid, (id) => id.replaceAll("-", ""))
+      : Effect.succeed(crossProviderCallKey({ callerThreadId, tool, callId }));
+
+  const spawn: CrossProviderAgentServiceShape["spawn"] = (callerThreadId, input, options) =>
     guard(
       "spawn",
       Effect.gen(function* () {
@@ -525,15 +606,17 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           });
         }
 
-        // Minted once per call: a retry of the same tool call reuses them, so
-        // a lost response can never create a second child or turn.
-        const childId = ThreadId.make(yield* uuid);
+        // Everything below derives from the call identity, so a re-issued
+        // call (same callId after a lost response) replays every command
+        // through its receipt instead of creating a second child or turn.
+        const key = yield* callIdentity(callerThreadId, "agent_spawn", options?.callId);
+        const childId = threadIdFromCallKey(key);
         const taskId = RuntimeTaskId.make(`xp-agent:${childId}`);
         const mint = (op: string) =>
-          Effect.map(uuid, (id) => CommandId.make(`server:xp-agent:${op}:${callerThreadId}:${id}`));
-        const createCommandId = yield* mint("thread-create");
-        const startedCommandId = yield* mint("task-started");
-        const turnCommandId = yield* mint("turn-start");
+          CommandId.make(`server:xp-agent:${op}:${callerThreadId}:${key}`);
+        const createCommandId = mint("thread-create");
+        const startedCommandId = mint("task-started");
+        const turnCommandId = mint("turn-start");
         const createdAt = yield* nowIso;
         const title = threadTitle(input.title, input.prompt);
 
@@ -576,7 +659,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           commandId: turnCommandId,
           threadId: childId,
           message: {
-            messageId: MessageId.make(yield* uuid),
+            messageId: MessageId.make(`xp-agent:spawn:${key}`),
             role: "user",
             text: input.prompt,
             attachments: [],
@@ -694,7 +777,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       }),
     );
 
-  const followUp: CrossProviderAgentServiceShape["followUp"] = (callerThreadId, input) =>
+  const followUp: CrossProviderAgentServiceShape["followUp"] = (callerThreadId, input, options) =>
     guard(
       "followUp",
       Effect.gen(function* () {
@@ -702,6 +785,14 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         if (isCrossProviderAgentErrorOutput(context)) return context;
         const child = yield* readOwnedChild(callerThreadId, input.childId);
         if (isCrossProviderAgentErrorOutput(child)) return child;
+        const key = yield* callIdentity(callerThreadId, "agent_follow_up", options?.callId);
+        const turnCommandId = CommandId.make(`server:xp-agent:follow-up:${callerThreadId}:${key}`);
+        const runningCommandId = CommandId.make(
+          `server:xp-agent:task-running:${callerThreadId}:${key}`,
+        );
+        if (options?.callId !== undefined && (yield* alreadyAccepted(turnCommandId))) {
+          return { childId: child.id, status: "running" as const };
+        }
         if (!evaluateCrossProviderChild(child).settled) {
           return fail({
             code: "child_not_settled",
@@ -709,25 +800,21 @@ const makeCrossProviderAgent = Effect.gen(function* () {
             childId: child.id,
           });
         }
-        const turnCommandId = CommandId.make(
-          `server:xp-agent:follow-up:${callerThreadId}:${yield* uuid}`,
-        );
-        const runningCommandId = CommandId.make(
-          `server:xp-agent:task-running:${callerThreadId}:${yield* uuid}`,
-        );
         yield* engine.dispatch({
           type: "thread.turn.start",
           commandId: turnCommandId,
           threadId: child.id,
           message: {
-            messageId: MessageId.make(yield* uuid),
+            messageId: MessageId.make(`xp-agent:follow-up:${key}`),
             role: "user",
             text: input.prompt,
             attachments: [],
           },
           runtimeMode: child.runtimeMode,
           interactionMode: child.interactionMode,
-          createdAt: yield* nowIso,
+          // Strictly after the last started turn so the pending-start check
+          // in evaluateCrossProviderChild cannot tie on the millisecond.
+          createdAt: stampAfter(yield* nowIso, child.latestTurn?.requestedAt),
         });
         yield* appendParentActivity({
           parentThreadId: child.spawn!.parentThreadId,
@@ -741,7 +828,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       }),
     );
 
-  const interrupt: CrossProviderAgentServiceShape["interrupt"] = (callerThreadId, input) =>
+  const interrupt: CrossProviderAgentServiceShape["interrupt"] = (callerThreadId, input, options) =>
     guard(
       "interrupt",
       Effect.gen(function* () {
@@ -749,6 +836,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         if (isCrossProviderAgentErrorOutput(context)) return context;
         const child = yield* readOwnedChild(callerThreadId, input.childId);
         if (isCrossProviderAgentErrorOutput(child)) return child;
+        const key = yield* callIdentity(callerThreadId, "agent_interrupt", options?.callId);
+        const interruptCommandId = CommandId.make(
+          `server:xp-agent:interrupt:${callerThreadId}:${key}`,
+        );
+        if (options?.callId !== undefined && (yield* alreadyAccepted(interruptCommandId))) {
+          return { childId: child.id, status: "interrupting" as const };
+        }
         const status = evaluateCrossProviderChild(child);
         if (status.settled) {
           return fail({
@@ -759,7 +853,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         }
         yield* engine.dispatch({
           type: "thread.turn.interrupt",
-          commandId: CommandId.make(`server:xp-agent:interrupt:${callerThreadId}:${yield* uuid}`),
+          commandId: interruptCommandId,
           threadId: child.id,
           ...(status.turnId === null ? {} : { turnId: status.turnId }),
           createdAt: yield* nowIso,
@@ -796,7 +890,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       ),
     );
 
-  const call: CrossProviderAgentServiceShape["call"] = (threadId, tool, args) =>
+  const call: CrossProviderAgentServiceShape["call"] = (threadId, tool, args, callId) =>
     Effect.gen(function* () {
       if (!isToolName(tool)) {
         return fail({ code: "invalid_input", message: `Unknown tool ${tool}.` });
@@ -816,6 +910,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           return yield* spawn(
             threadId,
             input as Schema.Schema.Type<typeof CROSS_PROVIDER_AGENT_TOOL_INPUTS.agent_spawn>,
+            { callId },
           );
         case "agent_wait":
           return yield* wait(
@@ -831,11 +926,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           return yield* followUp(
             threadId,
             input as Schema.Schema.Type<typeof CROSS_PROVIDER_AGENT_TOOL_INPUTS.agent_follow_up>,
+            { callId },
           );
         case "agent_interrupt":
           return yield* interrupt(
             threadId,
             input as Schema.Schema.Type<typeof CROSS_PROVIDER_AGENT_TOOL_INPUTS.agent_interrupt>,
+            { callId },
           );
       }
     }).pipe(

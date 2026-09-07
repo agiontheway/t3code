@@ -6719,13 +6719,13 @@ describe("ClaudeAdapterLive cross-provider in-process tools", () => {
 
   it.effect("injects an in-process t3 server whose tool handler reaches the host", () => {
     const harness = makeHarness();
-    const calls: Array<{ threadId: ThreadId; tool: string; args: unknown }> = [];
+    const calls: Array<{ threadId: ThreadId; tool: string; args: unknown; callId?: string }> = [];
     setCrossProviderAgentToolHost({
       toolsForThread: (threadId) =>
         Effect.succeed(threadId === THREAD_ID ? Option.some([CATALOG_SPEC]) : Option.none()),
-      call: (threadId, tool, args) =>
+      call: (threadId, tool, args, callId) =>
         Effect.sync(() => {
-          calls.push({ threadId, tool, args });
+          calls.push({ threadId, tool, args, ...(callId === undefined ? {} : { callId }) });
           return { output: { routes: [], callerDepth: 0 }, isError: false };
         }),
     });
@@ -6768,7 +6768,10 @@ describe("ClaudeAdapterLive cross-provider in-process tools", () => {
       );
       assert.deepEqual(result.content, [{ type: "text", text: '{"routes":[],"callerDepth":0}' }]);
       assert.notEqual(result.isError, true);
-      assert.deepEqual(calls, [{ threadId: THREAD_ID, tool: "agent_catalog", args: {} }]);
+      assert.equal(calls.length, 1);
+      assert.deepInclude(calls[0], { threadId: THREAD_ID, tool: "agent_catalog", args: {} });
+      // The MCP request id, namespaced per in-process server instance.
+      assert.match(calls[0]?.callId ?? "", /^[0-9a-f-]{36}:\S+$/u);
     }).pipe(
       Effect.scoped,
       Effect.provideService(Random.Random, makeDeterministicRandomService()),

@@ -42,7 +42,10 @@ import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import {
   applyOutputCap,
   CrossProviderAgentLive,
+  crossProviderCallKey,
   evaluateCrossProviderChild,
+  stampAfter,
+  threadIdFromCallKey,
 } from "./CrossProviderAgent.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
@@ -173,16 +176,36 @@ const seedRoot = (input?: {
     return threadId;
   });
 
+const assistantMessageId = (childId: ThreadId, turnId: string) =>
+  MessageId.make(`assistant-${childId}-${turnId}`);
+
+const completeAssistantMessage = (childId: ThreadId, turnId: string) =>
+  Effect.gen(function* () {
+    const engine = yield* OrchestrationEngineService;
+    yield* engine.dispatch({
+      type: "thread.message.assistant.complete",
+      commandId: CommandId.make(`cmd-complete-${childId}-${turnId}`),
+      threadId: childId,
+      messageId: assistantMessageId(childId, turnId),
+      turnId: TurnId.make(turnId),
+      createdAt: DateTime.formatIso(yield* DateTime.now),
+    });
+  });
+
 /**
- * Drive a child the way the provider reactor and ingestion would. Stamps
- * come from the ambient clock so they order correctly against the
- * service's own `DateTime.now` under both the TestClock and the live clock.
+ * Drive a child the way the provider reactor and ingestion do, in production
+ * order: the turn runs, its text streams in, the message is finalized, and
+ * only then does the settling session-set land. `leaveStreaming` stops before
+ * the finalize so a test can deliver it after settlement. Stamps come from
+ * the ambient clock so they order correctly against the service's own
+ * `DateTime.now` under both the TestClock and the live clock.
  */
 const settleChild = (input: {
   readonly childId: ThreadId;
   readonly turnId: string;
   readonly text: string;
   readonly status?: "ready" | "error" | "interrupted";
+  readonly leaveStreaming?: boolean;
 }) =>
   Effect.gen(function* () {
     const engine = yield* OrchestrationEngineService;
@@ -202,24 +225,18 @@ const settleChild = (input: {
       session: { ...session, status: "running", activeTurnId: turnId },
       createdAt: at,
     });
-    const messageId = MessageId.make(`assistant-${input.childId}-${input.turnId}`);
     yield* engine.dispatch({
       type: "thread.message.assistant.delta",
       commandId: CommandId.make(`cmd-delta-${input.childId}-${input.turnId}`),
       threadId: input.childId,
-      messageId,
+      messageId: assistantMessageId(input.childId, input.turnId),
       delta: input.text,
       turnId,
       createdAt: at,
     });
-    yield* engine.dispatch({
-      type: "thread.message.assistant.complete",
-      commandId: CommandId.make(`cmd-complete-${input.childId}-${input.turnId}`),
-      threadId: input.childId,
-      messageId,
-      turnId,
-      createdAt: at,
-    });
+    if (input.leaveStreaming !== true) {
+      yield* completeAssistantMessage(input.childId, input.turnId);
+    }
     const finalStatus = input.status ?? "ready";
     yield* engine.dispatch({
       type: "thread.session.set",
@@ -368,10 +385,73 @@ describe("applyOutputCap", () => {
     const capped = applyOutputCap(long, 500, "child-1");
     assert.isTrue(capped.truncated);
     assert.equal(capped.totalChars, 600);
-    assert.isTrue(capped.output.startsWith("a".repeat(250)));
-    assert.isTrue(capped.output.endsWith("b".repeat(250)));
-    assert.include(capped.output, "100 characters omitted");
-    assert.include(capped.output, 'childId "child-1", offset 250, limit 100');
+    // The marker is charged to the cap: the whole returned string fits.
+    assert.isAtMost(capped.output.length, 500);
+    assert.isAbove(capped.output.length, 450);
+    const [head, tail] = capped.output.split(/\n\[….*…\]\n/u);
+    assert.match(head!, /^a+$/u);
+    assert.match(tail!, /^b+$/u);
+    assert.equal(
+      head!.length + tail!.length,
+      600 - Number(/(\d+) characters omitted/u.exec(capped.output)![1]),
+    );
+    assert.include(
+      capped.output,
+      `offset ${head!.length}, limit ${600 - head!.length - tail!.length}`,
+    );
+    // Any cap that can hold the marker is honoured exactly.
+    for (const cap of [120, 200, 1000]) {
+      const sized = applyOutputCap(long + long, cap, "child-1");
+      assert.isTrue(sized.truncated);
+      assert.isAtMost(sized.output.length, cap);
+    }
+    // A cap smaller than the marker returns only the marker, never a negative slice.
+    const tiny = applyOutputCap(long, 20, "child-1");
+    assert.isTrue(tiny.truncated);
+    assert.match(tiny.output, /^\n\[….*…\]\n$/u);
+    assert.include(tiny.output, "600 characters omitted");
+  });
+});
+
+describe("call identity helpers", () => {
+  it("derives stable, UUID-shaped ids from the caller, tool, and call id", () => {
+    const key = crossProviderCallKey({
+      callerThreadId: ROOT,
+      tool: "agent_spawn",
+      callId: "call-1",
+    });
+    assert.equal(
+      key,
+      crossProviderCallKey({ callerThreadId: ROOT, tool: "agent_spawn", callId: "call-1" }),
+    );
+    assert.notEqual(
+      key,
+      crossProviderCallKey({ callerThreadId: ROOT, tool: "agent_spawn", callId: "call-2" }),
+    );
+    assert.notEqual(
+      key,
+      crossProviderCallKey({ callerThreadId: ROOT, tool: "agent_follow_up", callId: "call-1" }),
+    );
+    assert.match(
+      threadIdFromCallKey(key),
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+  });
+
+  it("stamps a follow-up strictly after the last started turn", () => {
+    assert.equal(
+      stampAfter("2026-09-07T00:00:01.000Z", "2026-09-07T00:00:00.000Z"),
+      "2026-09-07T00:00:01.000Z",
+    );
+    assert.equal(
+      stampAfter("2026-09-07T00:00:00.000Z", "2026-09-07T00:00:00.000Z"),
+      "2026-09-07T00:00:00.001Z",
+    );
+    assert.equal(
+      stampAfter("2026-09-07T00:00:00.000Z", "2026-09-07T00:00:05.000Z"),
+      "2026-09-07T00:00:05.001Z",
+    );
+    assert.equal(stampAfter("2026-09-07T00:00:00.000Z", null), "2026-09-07T00:00:00.000Z");
   });
 });
 
@@ -513,6 +593,105 @@ describe("CrossProviderAgentService", () => {
     }).pipe(Effect.provide(makeLayer())),
   );
 
+  it.effect("the same tool call identity yields exactly one child, row, and turn", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const args = { providerInstanceId: CODEX, model: "gpt-5.6-sol", prompt: "once" };
+      const first = yield* service.call(ROOT, "agent_spawn", args, "call-xp-1");
+      const replay = yield* service.call(ROOT, "agent_spawn", args, "call-xp-1");
+      assert.isFalse(first.isError);
+      assert.deepEqual(replay.output, first.output);
+      const childId = ThreadId.make((first.output as { childId: string }).childId);
+      const events = yield* readThreadEvents(childId);
+      assert.deepEqual(
+        events.map((event) => event.type),
+        ["thread.created", "thread.message-sent", "thread.turn-start-requested"],
+      );
+      assert.equal(
+        (yield* readActivities(ROOT)).filter((activity) => activity.kind === "task.started").length,
+        1,
+      );
+      // A different call identity is a different child.
+      const other = yield* service.call(ROOT, "agent_spawn", args, "call-xp-2");
+      assert.notEqual((other.output as { childId: string }).childId, childId);
+
+      yield* tick;
+      yield* settleChild({ childId, turnId: "turn-1", text: "done" });
+      const followed = yield* service.call(
+        ROOT,
+        "agent_follow_up",
+        { childId, prompt: "more" },
+        "call-xp-3",
+      );
+      const followedAgain = yield* service.call(
+        ROOT,
+        "agent_follow_up",
+        { childId, prompt: "more" },
+        "call-xp-3",
+      );
+      assert.isFalse(followed.isError);
+      assert.deepEqual(followedAgain.output, followed.output);
+      assert.equal(
+        (yield* readThreadEvents(childId)).filter(
+          (event) => event.type === "thread.turn-start-requested",
+        ).length,
+        2,
+      );
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
+  it.effect("wait does not read a settled child's output until its message is finalized", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const handle = yield* spawnSol(ROOT);
+      const childId = ThreadId.make(handle.childId);
+      yield* tick;
+      // Settled while the assistant message is still streaming (the order
+      // the runtime produced before finalize and settle were sequenced).
+      yield* settleChild({ childId, turnId: "turn-1", text: "final answer", leaveStreaming: true });
+      const waiting = yield* service.wait(ROOT, { childIds: [childId] }).pipe(Effect.forkScoped);
+      // Nothing settles yet: a wait with a timeout still reports running.
+      yield* tick;
+      yield* completeAssistantMessage(childId, "turn-1");
+      const settled = yield* Fiber.join(waiting);
+      if (isCrossProviderAgentErrorOutput(settled)) return yield* Effect.die(settled.error.code);
+      assert.deepEqual(settled.children, [
+        {
+          childId,
+          settled: true,
+          state: "completed",
+          output: "final answer",
+          truncated: false,
+          totalChars: 12,
+        },
+      ]);
+      const completed = (yield* readActivities(ROOT)).filter(
+        (activity) => activity.kind === "task.completed",
+      );
+      assert.equal(completed.length, 1);
+      assert.equal((completed[0]!.payload as { summary?: string }).summary, "final answer");
+    }).pipe(Effect.scoped, Effect.provide(makeLayer())),
+  );
+
+  it.effect("wait rejects unbounded inputs before touching any child", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      expectError(
+        (yield* service.call(ROOT, "agent_wait", {
+          childIds: Array.from({ length: 33 }, () => "x"),
+        })).output,
+        "invalid_input",
+      );
+      expectError(
+        (yield* service.call(ROOT, "agent_wait", { childIds: ["x"], timeoutSeconds: 601 })).output,
+        "invalid_input",
+      );
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
   it.effect("spawn fails closed on every route rule before creating anything", () =>
     Effect.gen(function* () {
       yield* seedRoot();
@@ -636,8 +815,9 @@ describe("CrossProviderAgentService", () => {
       assert.equal(entry.state, "completed");
       assert.equal(entry.truncated, true);
       assert.equal(entry.totalChars, 800);
-      assert.isTrue(entry.output?.startsWith("A".repeat(250)));
-      assert.isTrue(entry.output?.endsWith("Z".repeat(250)));
+      assert.isAtMost(entry.output!.length, 500);
+      assert.match(entry.output!, /^A+\n\[…/u);
+      assert.match(entry.output!, /…\]\nZ+$/u);
 
       // Settlement is mirrored onto the parent's row exactly once, even
       // though both the watcher and the wait observed it.
