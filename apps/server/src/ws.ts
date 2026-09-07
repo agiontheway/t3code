@@ -73,6 +73,7 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import { deriveDefaultCrossProviderAgentRoutes } from "@t3tools/shared/crossProviderAgentRoutes";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
@@ -1258,6 +1259,7 @@ const makeWsRpcLayer = (
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,
+            crossProviderAgentRouteDefaults: deriveDefaultCrossProviderAgentRoutes(providers),
             availableEditors,
             // Same discovery-with-timeout treatment as editors: a slow probe
             // must not stall server.getConfig, so it degrades to no targets.
@@ -1411,6 +1413,10 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "orchestration" },
           ),
+        // Matches never include spawned (cross-provider child) threads; the
+        // query excludes them server-side. Clients must only use matches to
+        // decorate thread lists that are already filtered the same way,
+        // never as a standalone list of threads.
         [ORCHESTRATION_WS_METHODS.searchThreads]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.searchThreads,
@@ -2757,7 +2763,11 @@ const makeWsRpcLayer = (
                 Stream.map((providers) => ({
                   version: 1 as const,
                   type: "providerStatuses" as const,
-                  payload: { providers },
+                  payload: {
+                    providers,
+                    crossProviderAgentRouteDefaults:
+                      deriveDefaultCrossProviderAgentRoutes(providers),
+                  },
                 })),
                 Stream.debounce(Duration.millis(PROVIDER_STATUS_DEBOUNCE_MS)),
               );

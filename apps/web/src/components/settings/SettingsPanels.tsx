@@ -586,6 +586,21 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
         ? ["Agent browser access"]
         : []),
+      ...(settings.enableCrossProviderAgentAccess !==
+      DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess
+        ? ["Cross-provider agent access"]
+        : []),
+      ...(settings.crossProviderAgentMaxDepth !==
+      DEFAULT_UNIFIED_SETTINGS.crossProviderAgentMaxDepth
+        ? ["Max orchestration depth"]
+        : []),
+      ...(settings.crossProviderAgentOutputCapChars !==
+      DEFAULT_UNIFIED_SETTINGS.crossProviderAgentOutputCapChars
+        ? ["Child output cap"]
+        : []),
+      ...(Object.keys(settings.crossProviderAgentRoutes).length > 0
+        ? ["Cross-provider routes"]
+        : []),
     ],
     [
       isTextGenerationModelDirty,
@@ -598,6 +613,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.browserAutoShowFloatingPreview,
       settings.appearanceContrast,
       settings.enableAgentBrowserAccess,
+      settings.enableCrossProviderAgentAccess,
+      settings.crossProviderAgentMaxDepth,
+      settings.crossProviderAgentOutputCapChars,
+      settings.crossProviderAgentRoutes,
       settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
@@ -749,6 +768,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       // name, so a user restoring defaults is told the agent regains access
       // rather than discovering it later.
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
+      enableCrossProviderAgentAccess: DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess,
+      crossProviderAgentMaxDepth: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentMaxDepth,
+      crossProviderAgentOutputCapChars: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentOutputCapChars,
+      crossProviderAgentRoutes: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentRoutes,
     });
     onRestored?.();
   }, [

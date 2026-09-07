@@ -514,10 +514,16 @@ importers:
       yauzl:
         specifier: ^3.4.0
         version: 3.4.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.0-beta.103
         version: 4.0.0-beta.103(patch_hash=a16b1e870d8c29e4a98b17cc4c638a4ff471753d8ca3487f78a22b759caf951b)(effect@4.0.0-beta.103(patch_hash=af36b7948b6f9c56623074662b51dade5699880c1a7c71245de73e13c3185fb6))
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@4.4.3)
       '@t3tools/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

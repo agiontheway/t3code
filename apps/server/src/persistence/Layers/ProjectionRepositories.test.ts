@@ -1,9 +1,10 @@
 import {
+  OrchestrationProposedPlanId,
   ProjectId,
+  ProviderInstanceId,
+  RuntimeTaskId,
   ThreadId,
   TurnId,
-  ProviderInstanceId,
-  OrchestrationProposedPlanId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -459,6 +460,53 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
       assert.strictEqual(updated?.snoozedUntil, null);
       assert.strictEqual(updated?.snoozedAt, null);
       assert.strictEqual(updated?.pinnedAt, null);
+    }),
+  );
+
+  it.effect("round-trips cross-provider spawn metadata through the thread row", () =>
+    Effect.gen(function* () {
+      const threads = yield* ProjectionThreadRepository;
+      const spawn = {
+        parentThreadId: ThreadId.make("thread-parent"),
+        allowOrchestration: true,
+        depth: 1,
+        taskId: RuntimeTaskId.make("xp-agent:thread-child"),
+      };
+      const base = {
+        threadId: ThreadId.make("thread-child"),
+        projectId: ProjectId.make("project-1"),
+        title: "Spawned child",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-sol" },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        latestTurnId: null,
+        createdAt: "2026-09-07T00:00:00.000Z",
+        updatedAt: "2026-09-07T00:00:00.000Z",
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        unsettledAt: null,
+        snoozedUntil: null,
+        snoozedAt: null,
+        pinnedAt: null,
+        latestUserMessageAt: null,
+        pendingApprovalCount: 0,
+        pendingUserInputCount: 0,
+        hasActionableProposedPlan: 0,
+        deletedAt: null,
+      };
+      yield* threads.upsert({ ...base, spawn });
+      const persisted = Option.getOrNull(yield* threads.getById({ threadId: base.threadId }));
+      assert.deepStrictEqual(persisted?.spawn, spawn);
+
+      // A user-created thread carries no ownership record.
+      yield* threads.upsert({ ...base, threadId: ThreadId.make("thread-root") });
+      const root = Option.getOrNull(
+        yield* threads.getById({ threadId: ThreadId.make("thread-root") }),
+      );
+      assert.strictEqual(root?.spawn, null);
     }),
   );
 

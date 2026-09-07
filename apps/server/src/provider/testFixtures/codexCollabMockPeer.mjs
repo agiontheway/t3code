@@ -66,6 +66,14 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/start") {
+    // Separate flag: the collab scripts assert the recorded list holds only
+    // child thread/resume calls, so root start params are opt-in.
+    if (script.recordThreadStart) {
+      NodeFS.appendFileSync(
+        `${process.env.T3_CODEX_COLLAB_SCRIPT}.requests`,
+        `${JSON.stringify({ method, params: message.params })}\n`,
+      );
+    }
     write({ id, result: fixture.responses.threadStart });
     return;
   }

@@ -2055,6 +2055,50 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             NULL
           )
       `;
+      // A cross-provider child is an ordinary thread that belongs to its
+      // parent's Direct Spawns roster, never to a list or search result.
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model_selection_json,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          latest_turn_id,
+          latest_user_message_at,
+          pending_approval_count,
+          pending_user_input_count,
+          has_actionable_proposed_plan,
+          created_at,
+          updated_at,
+          archived_at,
+          deleted_at,
+          spawn_json
+        )
+        VALUES (
+          'thread-spawned',
+          'project-search',
+          'Spawned child',
+          '{"provider":"codex","model":"gpt-5-codex"}',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          NULL,
+          NULL,
+          0,
+          0,
+          0,
+          '2026-05-01T00:00:06.000Z',
+          '2026-05-01T00:00:07.000Z',
+          NULL,
+          NULL,
+          '{"parentThreadId":"thread-active","allowOrchestration":false,"depth":1,"taskId":"xp-agent:thread-spawned"}'
+        )
+      `;
 
       yield* sql`
         INSERT INTO projection_thread_messages (
@@ -2137,6 +2181,16 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             0,
             '2026-05-01T00:00:16.000Z',
             '2026-05-01T00:00:16.000Z'
+          ),
+          (
+            'message-spawned',
+            'thread-spawned',
+            NULL,
+            'user',
+            'Spawned needle in a child thread.',
+            0,
+            '2026-05-01T00:00:17.000Z',
+            '2026-05-01T00:00:17.000Z'
           )
       `;
 
@@ -2194,6 +2248,10 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       );
       assert.deepStrictEqual(
         (yield* snapshotQuery.searchThreads({ query: "hidden needle" })).matches,
+        [],
+      );
+      assert.deepStrictEqual(
+        (yield* snapshotQuery.searchThreads({ query: "spawned needle" })).matches,
         [],
       );
       yield* sql`

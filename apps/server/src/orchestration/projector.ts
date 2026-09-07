@@ -336,6 +336,7 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
+            ...(payload.spawn !== undefined ? { spawn: payload.spawn } : {}),
             branchPullRequest: null,
             latestTurn: null,
             createdAt: payload.createdAt,

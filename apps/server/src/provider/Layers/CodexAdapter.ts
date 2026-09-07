@@ -1429,6 +1429,21 @@ function mapToRuntimeEvents(
     ];
   }
 
+  if (event.method === "session/warning") {
+    // Session-level notices the user must see in the thread (for example a
+    // resumed Codex session that lost its cross-provider agent tools).
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.warning",
+        payload: {
+          message: event.message ?? "Codex session warning",
+          ...(event.payload !== undefined ? { detail: event.payload } : {}),
+        },
+      },
+    ];
+  }
+
   if (event.method === "session/connecting") {
     return [
       {

@@ -4,6 +4,47 @@ T3 Code is an "agent harness control surface". It enables control of the agents 
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
 
+## About this fork
+
+This fork adds native cross-provider dispatch: a Claude or Codex thread can delegate work to
+another configured Claude or Codex instance, using that instance's own subscription or API-key
+configuration. OpenRouter-backed instances can participate through those same supported harnesses.
+Children use T3 Code's existing thread lifecycle and appear under **Agents → Direct Spawns**, with
+live status, token counts, tool counts, and reasoning effort.
+
+Dispatch runs inside T3 Code through the existing Claude Agent SDK and Codex app-server
+integrations. It requires no CLI proxy or separate dispatch service. The fork also retains the
+upstream snapshot's remote environments and machine load balancing.
+
+Start with [cross-provider agents](./docs/user/cross-provider-agents.md) for setup, OpenRouter,
+and a dispatch diagram. To build this fork with official T3 Connect enabled, follow
+[the source-build steps](#build-this-fork-with-t3-connect) below. The upstream downloads and
+`npx t3@latest` instructions on this page install upstream T3 Code, not this fork.
+
+### Build this fork with T3 Connect
+
+Use Node 24.13.1 or later within Node 24 and install `vp` as described below. From a fresh
+checkout of this fork:
+
+```sh
+cp .env.example .env
+vp i
+T3CODE_DESKTOP_SKIP_BUILD=false vp run dist:desktop:dmg:arm64
+```
+
+The existing `.env.example` supplies the official public Clerk publishable key, JWT template,
+CLI OAuth client ID, and relay URL. The local `.env` is ignored by Git. If you already have one,
+merge those four values rather than replacing unrelated settings. Process variables override
+`.env.local`, which overrides `.env`.
+
+Set this configuration **before compilation**. Without it, a source build hides T3 Connect and
+its sign-in entry. Rebuild after adding it; repackaging old output with `--skip-build` will keep
+Connect disabled. No private Clerk key or relay deployment credentials are needed.
+
+The command produces the macOS arm64 installer under `release/`. For other desktop targets,
+use the [native build options](./docs/operations/development.md#desktop-artifacts). See
+[T3 Connect setup](./docs/operations/connect-setup.md) for the full configuration reference.
+
 ## "Wait, what are you selling me?"
 
 Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.

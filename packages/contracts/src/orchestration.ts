@@ -17,6 +17,7 @@ import {
   PositiveInt,
   ProjectId,
   ProviderItemId,
+  RuntimeTaskId,
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -482,6 +483,20 @@ export const ThreadLinkedPullRequest = Schema.Struct({
 });
 export type ThreadLinkedPullRequest = typeof ThreadLinkedPullRequest.Type;
 
+/**
+ * Durable ownership record for a thread spawned by another thread through
+ * the cross-provider agent tools. Absent on every user-created thread.
+ * `taskId` is the Direct Spawns row on the parent; `depth` is the parent's
+ * depth + 1 (root threads are depth 0).
+ */
+export const ThreadSpawnMetadata = Schema.Struct({
+  parentThreadId: ThreadId,
+  allowOrchestration: Schema.Boolean,
+  depth: NonNegativeInt,
+  taskId: RuntimeTaskId,
+});
+export type ThreadSpawnMetadata = typeof ThreadSpawnMetadata.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -493,6 +508,7 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  spawn: Schema.optional(ThreadSpawnMetadata),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
@@ -575,6 +591,7 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  spawn: Schema.optional(ThreadSpawnMetadata),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
@@ -807,6 +824,7 @@ const ThreadCreateCommand = Schema.Struct({
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
   historyImport: Schema.optional(Schema.Literal(true)),
+  spawn: Schema.optional(ThreadSpawnMetadata),
 });
 
 const ThreadDeleteCommand = Schema.Struct({
@@ -1330,6 +1348,7 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  spawn: Schema.optional(ThreadSpawnMetadata),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

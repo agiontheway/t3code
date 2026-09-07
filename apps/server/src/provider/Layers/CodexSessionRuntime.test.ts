@@ -9,6 +9,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
+import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
@@ -780,12 +781,20 @@ describe("isRecoverableThreadResumeError", () => {
   });
 });
 
+/** A captured `thread/start` response: the raw path decodes it with the real schema. */
+function makeWireThreadStartResponse(threadId: string): unknown {
+  return {
+    ...wireFixture.responses.threadStart,
+    thread: { ...wireFixture.responses.threadStart.thread, id: threadId, sessionId: threadId },
+  };
+}
+
 describe("openCodexThread", () => {
   it.effect("resumes metadata when historical turns contain unknown error values", () =>
     Effect.gen(function* () {
       const response = makeThreadOpenResponse("saved-thread");
       const calls: unknown[] = [];
-      const opened = yield* openCodexThread({
+      const { opened, mode } = yield* openCodexThread({
         client: {
           request: () => Effect.die("A valid resumed thread must not start fresh"),
           raw: {
@@ -817,8 +826,17 @@ describe("openCodexThread", () => {
         requestedModel: "gpt-5.3-codex",
         serviceTier: "fast",
         resumeThreadId: "saved-thread",
+        dynamicTools: [
+          {
+            type: "function",
+            name: "agent_catalog",
+            description: "List routes.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
       });
 
+      NodeAssert.equal(mode, "resumed");
       NodeAssert.deepStrictEqual(opened, {
         cwd: response.cwd,
         model: response.model,
@@ -875,14 +893,11 @@ describe("openCodexThread", () => {
 
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
-      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const calls: Array<{ method: string; payload: unknown }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
         raw: {
-          request: (
-            method: "thread/resume",
-            payload: CodexRpc.ClientRequestParamsByMethod["thread/resume"],
-          ) => {
+          request: (method: string, payload?: unknown) => {
             calls.push({ method, payload });
             return Effect.fail(
               new CodexErrors.CodexAppServerRequestError({
@@ -901,7 +916,7 @@ describe("openCodexThread", () => {
         },
       };
 
-      const opened = yield* openCodexThread({
+      const { opened, mode } = yield* openCodexThread({
         client,
         threadId: ThreadId.make("thread-1"),
         runtimeMode: "full-access",
@@ -912,6 +927,7 @@ describe("openCodexThread", () => {
       });
 
       NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.equal(mode, "started");
       NodeAssert.deepStrictEqual(
         calls.map((call) => call.method),
         ["thread/resume", "thread/start"],
@@ -946,6 +962,125 @@ describe("openCodexThread", () => {
 
       NodeAssert.ok(isCodexAppServerRequestError(error));
       NodeAssert.equal(error.errorMessage, "timed out waiting for server");
+    }),
+  );
+
+  it.effect("sends dynamicTools on thread/start through the raw request path", () =>
+    Effect.gen(function* () {
+      const rawCalls: Array<{ method: string; payload: unknown }> = [];
+      const typedCalls: Array<string> = [];
+      const client = {
+        request: <M extends "thread/start" | "thread/resume">(
+          method: M,
+          _payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          typedCalls.push(method);
+          return Effect.succeed(
+            makeThreadOpenResponse("typed-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
+          );
+        },
+        raw: {
+          request: (method: string, payload?: unknown) => {
+            rawCalls.push({ method, payload });
+            return Effect.succeed(makeWireThreadStartResponse("raw-thread"));
+          },
+        },
+      };
+      const dynamicTools = [
+        {
+          type: "function" as const,
+          name: "agent_catalog",
+          description: "List routes.",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ];
+
+      const { opened, mode } = yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        dynamicTools,
+      });
+
+      NodeAssert.equal(opened.thread.id, "raw-thread");
+      NodeAssert.equal(mode, "started");
+      NodeAssert.deepStrictEqual(typedCalls, []);
+      NodeAssert.equal(rawCalls.length, 1);
+      NodeAssert.equal(rawCalls[0]?.method, "thread/start");
+      const payload = rawCalls[0]?.payload as Record<string, unknown>;
+      NodeAssert.deepStrictEqual(payload.dynamicTools, dynamicTools);
+      NodeAssert.equal(payload.cwd, "/tmp/project");
+      NodeAssert.equal(payload.model, "gpt-5.3-codex");
+    }),
+  );
+
+  it.effect("never sends dynamicTools on thread/resume but grants them on the start fallback", () =>
+    Effect.gen(function* () {
+      const typedCalls: Array<{ method: string; payload: unknown }> = [];
+      const rawCalls: Array<{ method: string; payload: unknown }> = [];
+      const client = {
+        request: <M extends "thread/start" | "thread/resume">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          typedCalls.push({ method, payload });
+          return Effect.fail(
+            new CodexErrors.CodexAppServerRequestError({
+              code: -32603,
+              errorMessage: "thread not found",
+            }),
+          );
+        },
+        raw: {
+          request: (method: string, payload?: unknown) => {
+            rawCalls.push({ method, payload });
+            if (method === "thread/resume") {
+              return Effect.fail(
+                new CodexErrors.CodexAppServerRequestError({
+                  code: -32603,
+                  errorMessage: "thread not found",
+                }),
+              );
+            }
+            return Effect.succeed(makeWireThreadStartResponse("fresh-thread"));
+          },
+        },
+      };
+      const dynamicTools = [
+        {
+          type: "function" as const,
+          name: "agent_catalog",
+          description: "List routes.",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ];
+
+      const { opened, mode } = yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "stale-thread",
+        dynamicTools,
+      });
+
+      NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.equal(mode, "started");
+      NodeAssert.deepStrictEqual(typedCalls, []);
+      const resumePayload = rawCalls[0]?.payload as Record<string, unknown> | undefined;
+      NodeAssert.ok(resumePayload !== undefined && !("dynamicTools" in resumePayload));
+      NodeAssert.deepStrictEqual(
+        rawCalls.map((call) => call.method),
+        ["thread/resume", "thread/start"],
+      );
+      const startPayload = rawCalls[1]?.payload as Record<string, unknown> | undefined;
+      NodeAssert.deepStrictEqual(startPayload?.dynamicTools, dynamicTools);
     }),
   );
 });

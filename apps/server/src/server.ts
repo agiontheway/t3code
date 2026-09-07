@@ -64,6 +64,7 @@ import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import { CrossProviderAgentLive } from "./orchestration/Layers/CrossProviderAgent.ts";
 import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationReactor.ts";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.ts";
 import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRuntimeIngestion.ts";
@@ -282,6 +283,10 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(ThreadSettlementReactor.layer),
   Layer.provideMerge(ThreadPullRequestReactor.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
+  // Registers the cross-provider agent tool host the Claude and Codex
+  // adapters consult at session start; sits above both provider and
+  // orchestration layers so the dependency direction stays one-way.
+  Layer.provideMerge(CrossProviderAgentLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
 );
 

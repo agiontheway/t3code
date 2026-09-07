@@ -23,6 +23,9 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+
+import type { OrchestrationDispatchError } from "../Errors.ts";
+import type { PlatformError } from "effect/PlatformError";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
@@ -1553,6 +1556,13 @@ const make = Effect.gen(function* () {
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
           : null;
+      // A terminal turn's session-set is the settlement signal readers wake
+      // on, so it must land after the turn's assistant text is finalized
+      // below; anything else applies immediately.
+      let deferredTerminalSessionSet: Effect.Effect<
+        void,
+        OrchestrationDispatchError | PlatformError
+      > | null = null;
 
       if (
         event.type === "session.started" ||
@@ -1627,24 +1637,31 @@ const make = Effect.gen(function* () {
             );
           }
 
-          yield* orchestrationEngine.dispatch({
-            type: "thread.session.set",
-            commandId: yield* providerCommandId(event, "thread-session-set"),
-            threadId: thread.id,
-            session: {
+          const dispatchSessionSet = Effect.gen(function* () {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.session.set",
+              commandId: yield* providerCommandId(event, "thread-session-set"),
               threadId: thread.id,
-              status,
-              providerName: event.provider,
-              ...(event.providerInstanceId !== undefined
-                ? { providerInstanceId: event.providerInstanceId }
-                : {}),
-              runtimeMode: thread.session?.runtimeMode ?? "full-access",
-              activeTurnId: nextActiveTurnId,
-              lastError,
-              updatedAt: now,
-            },
-            createdAt: now,
+              session: {
+                threadId: thread.id,
+                status,
+                providerName: event.provider,
+                ...(event.providerInstanceId !== undefined
+                  ? { providerInstanceId: event.providerInstanceId }
+                  : {}),
+                runtimeMode: thread.session?.runtimeMode ?? "full-access",
+                activeTurnId: nextActiveTurnId,
+                lastError,
+                updatedAt: now,
+              },
+              createdAt: now,
+            });
           });
+          if (isTerminalTurn) {
+            deferredTerminalSessionSet = dispatchSessionSet;
+          } else {
+            yield* dispatchSessionSet;
+          }
         }
       }
 
@@ -1908,6 +1925,9 @@ const make = Effect.gen(function* () {
             updatedAt: now,
           });
         }
+      }
+      if (deferredTerminalSessionSet !== null) {
+        yield* deferredTerminalSessionSet;
       }
 
       if (event.type === "session.exited") {

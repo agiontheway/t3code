@@ -34,10 +34,12 @@
     "stream-chain": "^4.2.5",
     "stream-json": "3.6.0",
     "yaml": "catalog:",
-    "yauzl": "^3.4.0"
+    "yauzl": "^3.4.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@t3tools/tailscale": "workspace:*",

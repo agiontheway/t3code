@@ -175,6 +175,8 @@ export function applyServerSettingsPatch(
     usagePriceOverrides: usagePriceOverridesPatch,
     projectAgentBrowserAccessOverrides: projectAgentBrowserAccessOverridesPatch,
     projectAutoPullOverrides: projectAutoPullOverridesPatch,
+    // Whole-map replacement; deepMerge would keep routes the client removed.
+    crossProviderAgentRoutes: crossProviderAgentRoutesPatch,
     ...patchForMerge
   } = patch;
   const currentBackgroundActivity = normalizeServerBackgroundActivitySettings(current);
@@ -230,6 +232,9 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
+      : {}),
+    ...(crossProviderAgentRoutesPatch !== undefined
+      ? { crossProviderAgentRoutes: crossProviderAgentRoutesPatch }
       : {}),
     ...(projectAgentBrowserAccessOverridesPatch !== undefined
       ? {

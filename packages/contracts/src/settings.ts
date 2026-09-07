@@ -843,6 +843,32 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+export const DEFAULT_CROSS_PROVIDER_AGENT_MAX_DEPTH = 2;
+export const DEFAULT_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS = 5000;
+export const MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS = 500;
+
+export const CrossProviderAgentMaxDepth = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+export type CrossProviderAgentMaxDepth = typeof CrossProviderAgentMaxDepth.Type;
+
+export const CrossProviderAgentOutputCapChars = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS),
+);
+export type CrossProviderAgentOutputCapChars = typeof CrossProviderAgentOutputCapChars.Type;
+
+/**
+ * One cross-provider route. `models` lists the exact slugs a caller may
+ * request on this instance; empty means every model in the instance's
+ * current catalog.
+ */
+export const CrossProviderAgentRoute = Schema.Struct({
+  enabled: Schema.Boolean,
+  models: Schema.Array(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+});
+export type CrossProviderAgentRoute = typeof CrossProviderAgentRoute.Type;
+
+export const CrossProviderAgentRoutes = Schema.Record(ProviderInstanceId, CrossProviderAgentRoute);
+export type CrossProviderAgentRoutes = typeof CrossProviderAgentRoutes.Type;
+
 export const ServerSettings = Schema.Struct({
   // Legacy token-by-token assistant output. Deliberately a fresh key (was
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
@@ -868,6 +894,27 @@ export const ServerSettings = Schema.Struct({
    */
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  /**
+   * Whether Claude and Codex threads receive the cross-provider agent tools
+   * (agent_catalog, agent_spawn, …). Server-authoritative like browser
+   * access: tool injection happens at session start on the server, and the
+   * answer must not differ between clients of the same environment.
+   */
+  enableCrossProviderAgentAccess: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  /** Root orchestrator is depth 0; a spawn is rejected past this depth. */
+  crossProviderAgentMaxDepth: CrossProviderAgentMaxDepth.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CROSS_PROVIDER_AGENT_MAX_DEPTH)),
+  ),
+  /** Child output above this length is returned as head + tail, flagged truncated. */
+  crossProviderAgentOutputCapChars: CrossProviderAgentOutputCapChars.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS)),
+  ),
+  /** Explicit eligibility; empty means the server-generated defaults apply. */
+  crossProviderAgentRoutes: CrossProviderAgentRoutes.pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   defaultAutoPull: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
@@ -1146,6 +1193,12 @@ export const ServerSettingsPatch = Schema.Struct({
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
   ),
+  enableCrossProviderAgentAccess: Schema.optionalKey(Schema.Boolean),
+  crossProviderAgentMaxDepth: Schema.optionalKey(CrossProviderAgentMaxDepth),
+  crossProviderAgentOutputCapChars: Schema.optionalKey(CrossProviderAgentOutputCapChars),
+  // Whole-map replacement, like `providerInstances`: the editor always sends
+  // the full map, and an empty map means "back to generated defaults".
+  crossProviderAgentRoutes: Schema.optionalKey(CrossProviderAgentRoutes),
   defaultAutoPull: Schema.optionalKey(Schema.Boolean),
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
   projectScriptOverrides: Schema.optionalKey(
