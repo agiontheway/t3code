@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
+  RuntimeTaskId,
   ThreadId,
   type OrchestrationShellSnapshot,
   type OrchestrationThread,
@@ -311,6 +312,57 @@ describe("environment entity projections", () => {
     expect(harness.registry.get(refsByProjectAtom).get(PROJECT_ID)).toBe(refs);
     expect(harness.registry.get(refsByProjectAtom)).toBe(membership);
     expect(harness.registry.get(threadsAtom)).toBe(threads);
+  });
+
+  it("keeps a spawned child thread out of every list while it stays readable by id", () => {
+    const harness = makeHarness();
+    const SPAWNED_THREAD_ID = ThreadId.make("thread-spawned");
+    const snapshot: OrchestrationShellSnapshot = {
+      ...SNAPSHOT,
+      threads: [
+        ...SNAPSHOT.threads,
+        {
+          ...THREAD_SHELL,
+          id: SPAWNED_THREAD_ID,
+          title: "Spawned child",
+          spawn: {
+            parentThreadId: THREAD_ID,
+            allowOrchestration: false,
+            depth: 1,
+            taskId: RuntimeTaskId.make("xp-agent:thread-spawned"),
+          },
+        },
+      ],
+    };
+    harness.registry.set(harness.shellStateAtom, AsyncResult.success(shellState(snapshot)));
+    const listAtom = harness.threadShells.threadShellsAtom;
+    const refsAtom = harness.threadShells.threadRefsAtom;
+    const environmentRefsAtom = harness.threadShells.environmentThreadRefsAtom(ENVIRONMENT_ID);
+    const projectListAtom = harness.threadShells.threadShellsForProjectRefsAtom([
+      { environmentId: ENVIRONMENT_ID, projectId: PROJECT_ID },
+    ]);
+    const pointAtom = harness.threadShells.threadShellAtom({
+      environmentId: ENVIRONMENT_ID,
+      threadId: SPAWNED_THREAD_ID,
+    });
+    try {
+      expect(harness.registry.get(listAtom).map((thread) => thread.id)).toEqual([
+        THREAD_ID,
+        OTHER_THREAD_ID,
+      ]);
+      expect(harness.registry.get(refsAtom).map((ref) => ref.threadId)).toEqual([
+        THREAD_ID,
+        OTHER_THREAD_ID,
+      ]);
+      expect(harness.registry.get(environmentRefsAtom).map((ref) => ref.threadId)).toEqual([
+        THREAD_ID,
+        OTHER_THREAD_ID,
+      ]);
+      expect(harness.registry.get(projectListAtom).map((thread) => thread.id)).toEqual([THREAD_ID]);
+      expect(harness.registry.get(pointAtom)?.title).toBe("Spawned child");
+    } finally {
+      harness.registry.dispose();
+    }
   });
 
   it("shares list values with point reads without retaining one atom per listed thread", () => {

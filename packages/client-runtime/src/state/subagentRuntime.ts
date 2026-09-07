@@ -79,6 +79,8 @@ export interface RuntimeSubagent {
   readonly workflowName: string | null;
   readonly phases: ReadonlyArray<SubagentWorkflowPhase>;
   readonly runHandles: SubagentRunHandles | null;
+  /** The child's own thread when the agent is one (cross-provider spawns); null for in-session subagents. */
+  readonly childThreadId: string | null;
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
   /** First retained observation, used as the roster's stable display order. */
   readonly firstSeenAt: string;
@@ -248,6 +250,7 @@ interface MutableAgent {
   workflowName: string | null;
   phases: ReadonlyArray<SubagentWorkflowPhase>;
   runHandles: SubagentRunHandles | null;
+  childThreadId: string | null;
   recentActivity: ReadonlyArray<SubagentActivityEntry>;
   firstSeenAt: string;
   startedAt: string | null;
@@ -305,6 +308,7 @@ function getOrCreate(
     workflowName: asString(payload.workflowName) ?? null,
     phases: [],
     runHandles: null,
+    childThreadId: asString(payload.childThreadId) ?? null,
     recentActivity: [],
     firstSeenAt: at,
     startedAt: null,
@@ -356,6 +360,8 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): vo
   }
   const outputFile = asString(payload.outputFile);
   if (outputFile) agent.outputFile = outputFile;
+  const childThreadId = asString(payload.childThreadId);
+  if (childThreadId) agent.childThreadId = childThreadId;
   if (Array.isArray(payload.phases)) {
     const phases: SubagentWorkflowPhase[] = [];
     for (const entry of payload.phases) {
