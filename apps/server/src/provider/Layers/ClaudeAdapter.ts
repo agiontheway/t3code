@@ -90,6 +90,7 @@ import {
 import {
   buildClaudeInProcessToolServer,
   CLAUDE_IN_PROCESS_SERVER_NAME,
+  isClaudeInProcessToolName,
 } from "./claudeInProcessTools.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
@@ -4433,6 +4434,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             behavior: "deny",
             message:
               "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.",
+          } satisfies PermissionResult;
+        }
+
+        // T3's own cross-provider agent tools are policy-checked on the
+        // server for every call; an approval prompt here would ask the user
+        // about T3 itself, not about the workspace.
+        if (isClaudeInProcessToolName(toolName)) {
+          return {
+            behavior: "allow",
+            updatedInput: toolInput,
           } satisfies PermissionResult;
         }
 

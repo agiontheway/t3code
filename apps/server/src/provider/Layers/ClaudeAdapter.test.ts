@@ -6840,6 +6840,149 @@ describe("ClaudeAdapterLive cross-provider in-process tools", () => {
     );
   });
 
+  it.effect("re-injects the in-process server on resume", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+      call: () => Effect.succeed({ output: {}, isError: false }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: RESUME_THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        resumeCursor: { resume: "550e8400-e29b-41d4-a716-446655440000" },
+        runtimeMode: "full-access",
+      });
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.resume, "550e8400-e29b-41d4-a716-446655440000");
+      assert.equal(options?.mcpServers?.t3?.type, "sdk");
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("auto-allows mcp__t3__ tools under approval-required and still gates others", () => {
+    const harness = makeHarness();
+    setCrossProviderAgentToolHost({
+      toolsForThread: () => Effect.succeed(Option.some([CATALOG_SPEC])),
+      call: () => Effect.succeed({ output: {}, isError: false }),
+    });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+      const adapter = yield* ClaudeAdapter;
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+      yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "spawn a codex child",
+        attachments: [],
+      });
+      yield* Stream.take(adapter.streamEvents, 1).pipe(Stream.runDrain);
+
+      const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+      assert.equal(typeof canUseTool, "function");
+      if (!canUseTool) return;
+
+      const allowed = (yield* Effect.promise(() =>
+        canUseTool(
+          "mcp__t3__agent_spawn",
+          { providerInstanceId: "codex", model: "gpt-5.6-sol", prompt: "go" },
+          {
+            signal: new AbortController().signal,
+            requestId: "request-xp-1",
+            suggestions: [],
+            toolUseID: "tool-use-xp-1",
+          },
+        ),
+      )) as PermissionResult;
+      assert.equal(allowed.behavior, "allow");
+
+      // The browser HTTP MCP server shares the `t3` stem but not the prefix:
+      // its tools still go through the user. Because the request stream is
+      // ordered, this being the FIRST request proves the t3 tool opened none.
+      const gatedPromise = canUseTool(
+        "mcp__t3-code__preview_click",
+        { selector: "#go" },
+        {
+          signal: new AbortController().signal,
+          requestId: "request-xp-2",
+          suggestions: [],
+          toolUseID: "tool-use-xp-2",
+        },
+      );
+      const requested = yield* Stream.runHead(adapter.streamEvents);
+      assert.equal(requested._tag, "Some");
+      if (requested._tag !== "Some" || requested.value.type !== "request.opened") {
+        return assert.fail("expected the browser tool to open an approval request");
+      }
+      assert.equal(
+        (requested.value.payload.args as { toolName?: string } | undefined)?.toolName,
+        "mcp__t3-code__preview_click",
+      );
+      yield* adapter.respondToRequest(
+        session.threadId,
+        ApprovalRequestId.make(requested.value.requestId!),
+        "decline",
+      );
+      const gated = (yield* Effect.promise(() => gatedPromise)) as PermissionResult;
+      assert.equal(gated.behavior, "deny");
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect(
+    "drops the server on the resume that follows an interrupt once access is revoked",
+    () => {
+      const harness = makeHarness();
+      let granted = true;
+      setCrossProviderAgentToolHost({
+        toolsForThread: () => Effect.succeed(granted ? Option.some([CATALOG_SPEC]) : Option.none()),
+        call: () => Effect.succeed({ output: {}, isError: false }),
+      });
+      return Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => Effect.sync(clearCrossProviderAgentToolHost));
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        assert.equal(harness.getLastCreateQueryInput()?.options.mcpServers?.t3?.type, "sdk");
+
+        // Interrupt tears the query down; the next turn resumes through
+        // startSession, which consults the host again.
+        yield* adapter.interruptTurn(session.threadId);
+        assert.equal(harness.query.closeCalls, 1);
+        granted = false;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          resumeCursor: { resume: "550e8400-e29b-41d4-a716-446655440000" },
+          runtimeMode: "full-access",
+        });
+        const resumed = harness.getLastCreateQueryInput()?.options;
+        assert.equal(resumed?.resume, "550e8400-e29b-41d4-a716-446655440000");
+        assert.isUndefined(resumed?.mcpServers);
+      }).pipe(
+        Effect.scoped,
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("omits mcpServers entirely when no host grants tools", () => {
     const harness = makeHarness();
     setCrossProviderAgentToolHost({

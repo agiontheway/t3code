@@ -12,6 +12,12 @@ import {
 
 /** Name of the in-process SDK server; Claude sees tools as `mcp__t3__<name>`. */
 export const CLAUDE_IN_PROCESS_SERVER_NAME = "t3";
+const CLAUDE_IN_PROCESS_TOOL_PREFIX = `mcp__${CLAUDE_IN_PROCESS_SERVER_NAME}__`;
+
+/** A tool served by T3's own in-process server (never the `t3-code` HTTP MCP server). */
+export function isClaudeInProcessToolName(toolName: string): boolean {
+  return toolName.startsWith(CLAUDE_IN_PROCESS_TOOL_PREFIX);
+}
 
 type ZodField = z.ZodTypeAny;
 
