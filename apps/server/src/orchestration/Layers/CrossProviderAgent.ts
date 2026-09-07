@@ -14,6 +14,7 @@ import {
   CROSS_PROVIDER_AGENT_TOOL_NAMES,
   classifyTaskAgentKind,
   CommandId,
+  crossProviderAgentEffortOptionId,
   EventId,
   isCrossProviderAgentErrorOutput,
   MessageId,
@@ -25,21 +26,34 @@ import {
   type CrossProviderAgentErrorOutput,
   type CrossProviderAgentToolName,
   type CrossProviderAgentWaitChild,
+  type ModelSelection,
   type OrchestrationEvent,
   type OrchestrationThread,
+  type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
+  type ProviderDriverKind,
+  type RuntimeTaskUsage,
   type ServerProvider,
+  type ServerProviderModel,
   type ServerSettings,
   type TurnId,
 } from "@t3tools/contracts";
 import { resolveCrossProviderAgentRoutes } from "@t3tools/shared/crossProviderAgentRoutes";
+import {
+  getModelSelectionStringOptionValue,
+  getProviderOptionCurrentValue,
+  getProviderOptionDescriptors,
+} from "@t3tools/shared/model";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -68,6 +82,13 @@ const CROSS_PROVIDER_AGENT_ROLE = "cross-provider";
 const MAX_OWNERSHIP_HOPS = 32;
 const MAX_TITLE_CHARS = 60;
 const MAX_SUMMARY_CHARS = 200;
+/** Parent-row telemetry is coalesced to at most one mirror per child per interval. */
+export const PROGRESS_MIRROR_INTERVAL_MS = 1000;
+/** Child-thread activities that carry the telemetry a native row would show. */
+const CHILD_TELEMETRY_ACTIVITY_KINDS: ReadonlyArray<string> = [
+  "context-window.updated",
+  "tool.started",
+];
 
 const fail = (error: CrossProviderAgentError): CrossProviderAgentErrorOutput => ({ error });
 const isThreadId = Schema.is(ThreadId);
@@ -193,6 +214,133 @@ function threadTitle(title: string | undefined, prompt: string): string {
   if (explicit) return explicit;
   const fromPrompt = prompt.trim().replace(/\s+/g, " ").slice(0, MAX_TITLE_CHARS).trim();
   return fromPrompt.length > 0 ? fromPrompt : "Cross-provider agent";
+}
+
+function effortDescriptor(model: ServerProviderModel | undefined, optionId: string | undefined) {
+  if (model?.capabilities === null || model?.capabilities === undefined || optionId === undefined) {
+    return undefined;
+  }
+  const descriptor = getProviderOptionDescriptors({ caps: model.capabilities }).find(
+    (candidate) => candidate.id === optionId,
+  );
+  return descriptor?.type === "select" ? descriptor : undefined;
+}
+
+/** A thread's effective effort: its explicit selection resolved against its model's choices, else the model default. */
+function effectiveThreadEffort(input: {
+  readonly driver: ProviderDriverKind;
+  readonly model: ServerProviderModel | undefined;
+  readonly modelSelection: ModelSelection;
+}): string | undefined {
+  const optionId = crossProviderAgentEffortOptionId(input.driver);
+  if (optionId === undefined) return undefined;
+  const raw = getModelSelectionStringOptionValue(input.modelSelection, optionId);
+  if (input.model?.capabilities === null || input.model?.capabilities === undefined) return raw;
+  const descriptor = getProviderOptionDescriptors({
+    caps: input.model.capabilities,
+    ...(raw !== undefined ? { selections: [{ id: optionId, value: raw }] } : {}),
+  }).find((candidate) => candidate.id === optionId);
+  const value = getProviderOptionCurrentValue(descriptor);
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * The effort a child runs at, the way a native spawn resolves it: an
+ * explicit request wins (and must be one the target model offers), else the
+ * parent's effective effort when the target offers it, else the target's
+ * default. A target without an effort option gets none.
+ */
+export function resolveCrossProviderEffort(input: {
+  readonly explicit: string | undefined;
+  readonly parent: {
+    readonly driver: ProviderDriverKind;
+    readonly model: ServerProviderModel | undefined;
+    readonly modelSelection: ModelSelection;
+  };
+  readonly target: { readonly driver: ProviderDriverKind; readonly model: ServerProviderModel };
+}):
+  | { readonly optionId: string; readonly effort: string | undefined }
+  | { readonly unsupported: ReadonlyArray<string> } {
+  const optionId = crossProviderAgentEffortOptionId(input.target.driver) ?? "effort";
+  const descriptor = effortDescriptor(input.target.model, optionId);
+  const choices = descriptor?.options.map((choice) => choice.id) ?? [];
+  const explicit = input.explicit?.trim();
+  if (explicit !== undefined && explicit.length > 0) {
+    return choices.includes(explicit) ? { optionId, effort: explicit } : { unsupported: choices };
+  }
+  if (descriptor === undefined) return { optionId, effort: undefined };
+  const inherited = effectiveThreadEffort(input.parent);
+  if (inherited !== undefined && choices.includes(inherited)) {
+    return { optionId, effort: inherited };
+  }
+  const fallback = getProviderOptionCurrentValue(descriptor);
+  return { optionId, effort: typeof fallback === "string" ? fallback : undefined };
+}
+
+/** The effort a child was created with; the option id is the target driver's. */
+function childEffort(modelSelection: ModelSelection): string | undefined {
+  return (
+    getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
+    getModelSelectionStringOptionValue(modelSelection, "effort")
+  );
+}
+
+function finiteCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** Tool name the way a native row shows it: the provider's tool name, else the item title. */
+function toolNameFromActivity(payload: unknown): string | undefined {
+  if (!Predicate.isObject(payload)) return undefined;
+  const data = payload.data;
+  return (
+    (Predicate.isObject(data) ? nonEmptyString(data.toolName) : undefined) ??
+    nonEmptyString(payload.title)
+  );
+}
+
+export interface CrossProviderChildTelemetry {
+  readonly usage: RuntimeTaskUsage | undefined;
+  readonly lastToolName: string | undefined;
+}
+
+/**
+ * A child's telemetry, read from its own retained activities: cumulative
+ * tokens from `context-window.updated` (`totalProcessedTokens`, else the
+ * context size) and tool uses from `tool.started`. Cumulative by
+ * construction, so the parent row's max-merge never shrinks. `toolUsesFloor`
+ * carries a live count past the retained-activity window.
+ */
+export function childTelemetryFromActivities(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+  toolUsesFloor = 0,
+): CrossProviderChildTelemetry {
+  let totalTokens: number | undefined;
+  let toolUses = 0;
+  let lastToolName: string | undefined;
+  for (const activity of activities) {
+    if (activity.kind === "context-window.updated" && Predicate.isObject(activity.payload)) {
+      const total =
+        finiteCount(activity.payload.totalProcessedTokens) ??
+        finiteCount(activity.payload.usedTokens);
+      if (total !== undefined) totalTokens = Math.max(totalTokens ?? 0, total);
+    } else if (activity.kind === "tool.started") {
+      toolUses += 1;
+      lastToolName = toolNameFromActivity(activity.payload) ?? lastToolName;
+    }
+  }
+  toolUses = Math.max(toolUses, toolUsesFloor);
+  return {
+    usage:
+      totalTokens === undefined
+        ? undefined
+        : { totalTokens: Math.round(totalTokens), ...(toolUses > 0 ? { toolUses } : {}) },
+    lastToolName,
+  };
 }
 
 const toolInputDecoders = Object.fromEntries(
@@ -327,10 +475,21 @@ const makeCrossProviderAgent = Effect.gen(function* () {
     return notOwner;
   });
 
+  /**
+   * Lifecycle rows keep one activity per command; telemetry rows pass a
+   * stable `activityId` (the ids ingestion uses for native rows) so each
+   * mirror replaces the previous one in the projection instead of growing it.
+   */
   const appendParentActivity = (input: {
     readonly parentThreadId: ThreadId;
     readonly commandId: CommandId;
-    readonly kind: "task.started" | "task.updated" | "task.completed";
+    readonly activityId?: string;
+    readonly kind:
+      | "task.started"
+      | "task.updated"
+      | "task.completed"
+      | "task.progress"
+      | "tool.progress";
     readonly summary: string;
     readonly payload: Record<string, unknown>;
   }) =>
@@ -341,7 +500,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         commandId: input.commandId,
         threadId: input.parentThreadId,
         activity: {
-          id: EventId.make(`xp-agent:${input.commandId}`),
+          id: EventId.make(input.activityId ?? `xp-agent:${input.commandId}`),
           tone: "info",
           kind: input.kind,
           summary: input.summary,
@@ -361,22 +520,40 @@ const makeCrossProviderAgent = Effect.gen(function* () {
     title: child.title,
     role: CROSS_PROVIDER_AGENT_ROLE,
     model: child.modelSelection.model,
+    ...(childEffort(child.modelSelection) !== undefined
+      ? { effort: childEffort(child.modelSelection) }
+      : {}),
     timelineBypass: true,
     childThreadId: child.id,
     providerInstanceId: child.modelSelection.instanceId,
   });
+
+  const readChildTelemetry = (childId: ThreadId, toolUsesFloor: number) =>
+    Effect.map(
+      projection.getThreadDetailById(childId, { activityKinds: CHILD_TELEMETRY_ACTIVITY_KINDS }),
+      (detail) =>
+        childTelemetryFromActivities(
+          Option.isSome(detail) ? detail.value.activities : [],
+          toolUsesFloor,
+        ),
+    );
 
   /**
    * Mirror a settled child onto its parent's row exactly once per turn: the
    * command id carries the turn, so a wait and the background watcher can
    * both observe the same settlement without a duplicate row.
    */
-  const mirrorSettlement = (child: OrchestrationThreadShell, status: CrossProviderChildStatus) =>
+  const mirrorSettlement = (
+    child: OrchestrationThreadShell,
+    status: CrossProviderChildStatus,
+    toolUsesFloor = 0,
+  ) =>
     Effect.gen(function* () {
       if (!status.settled || child.spawn === undefined) return;
       const detail = yield* projection.getThreadDetailById(child.id, { activityKinds: [] });
       const output = Option.isSome(detail) ? finalAssistantText(detail.value, status.turnId) : "";
       const summary = boundedSummary(output);
+      const telemetry = yield* readChildTelemetry(child.id, toolUsesFloor);
       const completedStatus =
         status.state === "completed"
           ? "completed"
@@ -394,6 +571,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           ...rowLinkage(child),
           status: completedStatus,
           ...(summary ? { summary } : {}),
+          ...(telemetry.usage ? { typedUsage: telemetry.usage } : {}),
           ...(status.state === "error" && child.session?.lastError
             ? { error: child.session.lastError }
             : {}),
@@ -429,19 +607,103 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       );
     });
 
+  interface ProgressMirrorState {
+    dirty: boolean;
+    lastFlushMs: number;
+    lastSequence: number;
+    toolUsesFloor: number;
+    mirroredTotalTokens: number | undefined;
+    mirroredToolUses: number | undefined;
+    mirroredToolName: string | undefined;
+    fiber: Fiber.Fiber<void> | null;
+  }
+
+  const newProgressState = (): ProgressMirrorState => ({
+    dirty: false,
+    lastFlushMs: Number.NEGATIVE_INFINITY,
+    lastSequence: 0,
+    toolUsesFloor: 0,
+    mirroredTotalTokens: undefined,
+    mirroredToolUses: undefined,
+    mirroredToolName: undefined,
+    fiber: null,
+  });
+
+  /**
+   * Mirror the child's current telemetry onto its parent row with the same
+   * stable activity ids ingestion gives native rows. The command id carries
+   * the last child event folded in, so a repeated flush replays its receipt.
+   */
+  const flushProgress = (childId: ThreadId, state: ProgressMirrorState) =>
+    Effect.gen(function* () {
+      const shell = yield* readShell(childId);
+      if (Option.isNone(shell)) return;
+      const child = shell.value;
+      const spawn = child.spawn;
+      if (spawn === undefined) return;
+      const parentThreadId = spawn.parentThreadId;
+      const taskId = spawn.taskId;
+      const telemetry = yield* readChildTelemetry(childId, state.toolUsesFloor);
+      const mint = (op: string) =>
+        CommandId.make(`server:xp-agent:${op}:${parentThreadId}:${childId}:${state.lastSequence}`);
+      if (
+        telemetry.usage !== undefined &&
+        (telemetry.usage.totalTokens !== state.mirroredTotalTokens ||
+          telemetry.usage.toolUses !== state.mirroredToolUses)
+      ) {
+        yield* appendParentActivity({
+          parentThreadId,
+          commandId: mint("task-usage"),
+          activityId: `task-usage:${parentThreadId}:${taskId}`,
+          kind: "task.progress",
+          summary: "Task usage updated",
+          payload: { ...rowLinkage(child), usageSnapshot: true, typedUsage: telemetry.usage },
+        });
+        state.mirroredTotalTokens = telemetry.usage.totalTokens;
+        state.mirroredToolUses = telemetry.usage.toolUses;
+      }
+      if (
+        telemetry.lastToolName !== undefined &&
+        telemetry.lastToolName !== state.mirroredToolName
+      ) {
+        yield* appendParentActivity({
+          parentThreadId,
+          commandId: mint("task-progress"),
+          activityId: `task-progress:${parentThreadId}:${taskId}`,
+          kind: "task.progress",
+          summary: `Cross-provider agent used ${telemetry.lastToolName}`,
+          payload: { ...rowLinkage(child), lastToolName: telemetry.lastToolName },
+        });
+        yield* appendParentActivity({
+          parentThreadId,
+          commandId: mint("tool-progress"),
+          activityId: `tool-progress:${parentThreadId}:${taskId}`,
+          kind: "tool.progress",
+          summary: telemetry.lastToolName,
+          payload: { taskId, toolName: telemetry.lastToolName },
+        });
+        state.mirroredToolName = telemetry.lastToolName;
+      }
+    });
+
   /**
    * Subscribe first, then read: any settlement committed before the read is
    * visible in the projection, anything after it arrives on the stream.
+   * With `mirrorProgress`, the child's usage and tool activity are mirrored
+   * onto the parent row as they arrive, coalesced to one mirror per
+   * `PROGRESS_MIRROR_INTERVAL_MS`; settlement always carries the final values.
    */
   const awaitSettlement = (
     childIds: ReadonlyArray<ThreadId>,
     timeout: Duration.Duration | undefined,
+    options?: { readonly mirrorProgress?: boolean },
   ) =>
     Effect.scoped(
       Effect.gen(function* () {
         const events = yield* engine.subscribeDomainEvents;
         const pending = new Set<string>(childIds);
         const statuses = new Map<ThreadId, CrossProviderChildStatus>();
+        const progress = new Map<ThreadId, ProgressMirrorState>();
         const refresh = (childId: ThreadId) =>
           Effect.gen(function* () {
             const shell = yield* readShell(childId);
@@ -456,17 +718,81 @@ const makeCrossProviderAgent = Effect.gen(function* () {
             statuses.set(childId, status);
             if (status.settled) {
               pending.delete(childId);
-              yield* mirrorSettlement(shell.value, status);
+              const state = progress.get(childId);
+              progress.delete(childId);
+              if (state?.fiber) yield* Fiber.interrupt(state.fiber);
+              yield* mirrorSettlement(shell.value, status, state?.toolUsesFloor ?? 0);
+            }
+          });
+        // One scheduler per child: the first event mirrors at once, later
+        // ones wait out the interval and mirror the latest state. The final
+        // dirty check and the fiber hand-back share one synchronous step so
+        // an event landing between them cannot be stranded.
+        const runScheduler = (childId: ThreadId, state: ProgressMirrorState) =>
+          Effect.gen(function* () {
+            for (;;) {
+              const now = yield* Clock.currentTimeMillis;
+              const wait = state.lastFlushMs + PROGRESS_MIRROR_INTERVAL_MS - now;
+              if (wait > 0) yield* Effect.sleep(Duration.millis(wait));
+              if (!pending.has(childId)) {
+                state.fiber = null;
+                return;
+              }
+              state.dirty = false;
+              // A settlement interrupt waits for an in-flight mirror rather
+              // than cutting a parent dispatch short.
+              yield* Effect.uninterruptible(flushProgress(childId, state));
+              state.lastFlushMs = yield* Clock.currentTimeMillis;
+              if (!state.dirty) {
+                state.fiber = null;
+                return;
+              }
+            }
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.void
+                : Effect.logWarning("cross-provider agent telemetry mirror failed", {
+                    childThreadId: childId,
+                    cause: Cause.pretty(cause),
+                  }).pipe(
+                    Effect.andThen(
+                      Effect.sync(() => {
+                        state.fiber = null;
+                      }),
+                    ),
+                  ),
+            ),
+          );
+        const observe = (event: OrchestrationEvent) =>
+          Effect.gen(function* () {
+            if (event.type === "thread.activity-appended") {
+              if (options?.mirrorProgress !== true) return;
+              const childId = event.payload.threadId;
+              const kind = event.payload.activity.kind;
+              if (!pending.has(childId) || !CHILD_TELEMETRY_ACTIVITY_KINDS.includes(kind)) return;
+              let state = progress.get(childId);
+              if (state === undefined) {
+                state = newProgressState();
+                progress.set(childId, state);
+              }
+              state.dirty = true;
+              state.lastSequence = Math.max(state.lastSequence, event.sequence);
+              if (kind === "tool.started") state.toolUsesFloor += 1;
+              if (state.fiber === null) {
+                state.fiber = yield* Effect.forkScoped(runScheduler(childId, state));
+              }
+              return;
+            }
+            const threadId = settlementEventThreadId(event);
+            if (threadId !== undefined && pending.has(threadId)) {
+              yield* refresh(threadId);
             }
           });
         yield* Effect.forEach(childIds, refresh, { discard: true });
         if (pending.size > 0) {
           const drain = events.pipe(
-            Stream.map(settlementEventThreadId),
-            Stream.filter(
-              (threadId): threadId is ThreadId => threadId !== undefined && pending.has(threadId),
-            ),
-            Stream.mapEffect(refresh),
+            Stream.mapEffect(observe),
             Stream.takeUntil(() => pending.size === 0),
             Stream.runDrain,
           );
@@ -478,7 +804,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
 
   /** Keep the parent's row honest even when nobody waits on the child. */
   const watchSettlement = (childId: ThreadId) =>
-    awaitSettlement([childId], undefined).pipe(
+    awaitSettlement([childId], undefined, { mirrorProgress: true }).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.void
@@ -592,6 +918,32 @@ const makeCrossProviderAgent = Effect.gen(function* () {
             model: input.model,
           });
         }
+        const targetModel = route.provider.models.find((model) => model.slug === input.model)!;
+        const callerProvider = providers.find(
+          (provider) => provider.instanceId === context.callerInstanceId,
+        )!;
+        const effort = resolveCrossProviderEffort({
+          explicit: input.effort,
+          parent: {
+            driver: callerProvider.driver,
+            model: callerProvider.models.find(
+              (model) => model.slug === parent.modelSelection.model,
+            ),
+            modelSelection: parent.modelSelection,
+          },
+          target: { driver: route.provider.driver, model: targetModel },
+        });
+        if ("unsupported" in effort) {
+          return fail({
+            code: "invalid_input",
+            message:
+              effort.unsupported.length === 0
+                ? `Model ${input.model} on that instance has no effort setting; omit effort.`
+                : `Model ${input.model} on that instance does not offer effort "${input.effort}"; offered: ${effort.unsupported.join(", ")}.`,
+            providerInstanceId: targetInstanceId,
+            model: input.model,
+          });
+        }
         const allowOrchestration = input.allowOrchestration === true;
         const childDepth = context.callerDepth + 1;
         const maxDepth = settings.crossProviderAgentMaxDepth;
@@ -626,7 +978,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           threadId: childId,
           projectId: parent.projectId,
           title,
-          modelSelection: { instanceId: targetInstanceId, model: input.model },
+          modelSelection: {
+            instanceId: targetInstanceId,
+            model: input.model,
+            ...(effort.effort !== undefined
+              ? { options: [{ id: effort.optionId, value: effort.effort }] }
+              : {}),
+          },
           runtimeMode: parent.runtimeMode,
           interactionMode: parent.interactionMode,
           branch: parent.branch,
@@ -674,6 +1032,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
           childThreadId: childId,
           providerInstanceId: targetInstanceId,
           model: input.model,
+          effort: effort.effort ?? null,
           depth: childDepth,
           allowOrchestration,
         });

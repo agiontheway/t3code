@@ -26,6 +26,23 @@ export const CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS: ReadonlyArray<ProviderDrive
   ProviderDriverKind.make("codex"),
 ];
 
+/**
+ * The `modelSelection.options` id each supported driver reads its reasoning
+ * effort from (Claude: `effort`, Codex: `reasoningEffort`). A child's
+ * resolved effort is stored under the target driver's id so the adapter
+ * applies it exactly as it would a user-selected one.
+ */
+export const CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS: Readonly<Record<string, string>> = {
+  claudeAgent: "effort",
+  codex: "reasoningEffort",
+};
+
+export function crossProviderAgentEffortOptionId(driver: ProviderDriverKind): string | undefined {
+  return Object.prototype.hasOwnProperty.call(CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS, driver)
+    ? CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS[driver]
+    : undefined;
+}
+
 const SAME_INSTANCE_NOTE =
   "Use this only to delegate to a DIFFERENT provider instance than your own; for your own provider use your native spawn/subagent tool. providerInstanceId is authoritative and must come from agent_catalog (never a display name, driver, or model name). childId values are durable T3 thread ids that survive session restarts.";
 
@@ -34,7 +51,7 @@ export const CROSS_PROVIDER_AGENT_TOOL_DESCRIPTIONS: Record<CrossProviderAgentTo
     "List the provider instances and exact model ids you may spawn cross-provider children on, plus your orchestration depth. Entries flagged isCallerInstance are your own instance and cannot be targeted. " +
     SAME_INSTANCE_NOTE,
   agent_spawn:
-    "Create and start ONE child thread on an exact different provider instance with the given prompt. The child inherits your project, worktree, branch, and permission mode. Returns a durable childId; use agent_wait to collect its result. Set allowOrchestration only when the child must itself delegate further (costs one depth level). " +
+    "Create and start ONE child thread on an exact different provider instance with the given prompt. The child inherits your project, worktree, branch, and permission mode. Returns a durable childId; use agent_wait to collect its result. Set allowOrchestration only when the child must itself delegate further (costs one depth level). Omit effort to inherit your own reasoning effort when the target model offers it (otherwise the target's default); an effort the target model does not offer is rejected. " +
     SAME_INSTANCE_NOTE,
   agent_wait:
     "Block until the given owned children settle (completed, error, or interrupted) or timeoutSeconds elapses, then return each child's state and final output. Waits on T3 events; call again with the unsettled ids to keep waiting. Long outputs are returned as head + tail with truncated:true; fetch the rest with agent_result.",
@@ -68,6 +85,12 @@ export const CrossProviderAgentSpawnInput = Schema.Struct({
   allowOrchestration: Schema.optionalKey(
     Schema.Boolean.annotate({
       description: "Grant the child these same tools so it can delegate further. Default false.",
+    }),
+  ),
+  effort: Schema.optionalKey(
+    Schema.String.annotate({
+      description:
+        "Reasoning effort for the child, one of the levels the target model offers (for example low, medium, high). Defaults to your own effort when the target offers it, else the target's default.",
     }),
   ),
 });

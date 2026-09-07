@@ -3,8 +3,17 @@
 A Claude or Codex thread can hand work to a child thread on one of your _other_ configured
 providers: a Claude orchestrator can delegate to your Codex subscription, and a Codex thread can
 delegate to Claude. Each child is an ordinary thread in the same project, worktree, and branch, and
-appears under **Agents → Direct Spawns** on the parent while it runs. Delegating inside one provider
-keeps using that provider's own subagent tools; this feature only covers crossing providers.
+appears under **Agents → Direct Spawns** on the parent while it runs, with the same live status,
+token, tool, and effort details as a native subagent. Delegating inside one provider keeps using
+that provider's own subagent tools; this feature only covers crossing providers.
+
+Children do not appear in the thread list, search, or the mobile home screen. Open one by clicking
+its row under **Agents → Direct Spawns** on the parent; it is a normal thread from there, and its
+link keeps working after a reconnect.
+
+A child runs at the reasoning effort the parent asked for. When the parent does not ask, the child
+uses the parent thread's own effort if the other provider's model offers that level, otherwise that
+model's default.
 
 ## Turning it on
 

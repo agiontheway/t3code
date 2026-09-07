@@ -1,6 +1,7 @@
 import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EventId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -10,7 +11,9 @@ import {
   TurnId,
   isCrossProviderAgentErrorOutput,
   type CrossProviderAgentErrorOutput,
+  type ModelCapabilities,
   type OrchestrationEvent,
+  type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type ServerProvider,
   type ServerSettings,
@@ -22,6 +25,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -41,6 +45,7 @@ import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import {
   applyOutputCap,
+  childTelemetryFromActivities,
   CrossProviderAgentLive,
   crossProviderCallKey,
   evaluateCrossProviderChild,
@@ -59,6 +64,41 @@ const CURSOR = ProviderInstanceId.make("cursor");
 const PROJECT_ID = ProjectId.make("project-xp");
 const ROOT = ThreadId.make("thread-root");
 const NOW = "2026-09-07T00:00:00.000Z";
+
+/** Effort choices the way each driver's catalog describes them. */
+const EFFORT_CAPABILITIES: Record<string, ModelCapabilities> = {
+  claudeAgent: {
+    optionDescriptors: [
+      {
+        id: "effort",
+        label: "Effort",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "medium", label: "Medium" },
+          { id: "high", label: "High", isDefault: true },
+          { id: "max", label: "Max" },
+        ],
+      },
+    ],
+  },
+  codex: {
+    optionDescriptors: [
+      {
+        id: "reasoningEffort",
+        label: "Reasoning",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "medium", label: "Medium", isDefault: true },
+          { id: "high", label: "High" },
+          { id: "xhigh", label: "Extra high" },
+        ],
+        currentValue: "medium",
+      },
+    ],
+  },
+};
 
 const provider = (
   instanceId: ProviderInstanceId,
@@ -79,7 +119,7 @@ const provider = (
     slug,
     name: slug.toUpperCase(),
     isCustom: false,
-    capabilities: null,
+    capabilities: EFFORT_CAPABILITIES[driver] ?? null,
   })),
   slashCommands: [],
   skills: [],
@@ -146,6 +186,7 @@ const seedRoot = (input?: {
   readonly threadId?: ThreadId;
   readonly instanceId?: ProviderInstanceId;
   readonly model?: string;
+  readonly options?: ReadonlyArray<{ readonly id: string; readonly value: string }>;
 }) =>
   Effect.gen(function* () {
     const engine = yield* OrchestrationEngineService;
@@ -169,6 +210,7 @@ const seedRoot = (input?: {
       modelSelection: {
         instanceId: input?.instanceId ?? CLAUDE,
         model: input?.model ?? "claude-fable-5-1",
+        ...(input?.options ? { options: input.options } : {}),
       },
       interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
       runtimeMode: "full-access",
@@ -283,6 +325,61 @@ const readThreadEvents = (threadId: ThreadId) =>
       ),
     ) as OrchestrationEvent[];
   });
+
+let childActivitySequence = 0;
+/** Append one activity to a child the way ingestion would, with a fresh id and stamp. */
+const appendChildActivity = (childId: ThreadId, kind: string, payload: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    const engine = yield* OrchestrationEngineService;
+    childActivitySequence += 1;
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    yield* engine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`cmd-child-activity-${childId}-${childActivitySequence}`),
+      threadId: childId,
+      activity: {
+        id: EventId.make(`child-activity-${childId}-${childActivitySequence}`),
+        tone: "info",
+        kind,
+        summary: kind,
+        payload,
+        turnId: null,
+        createdAt,
+      },
+      createdAt,
+    });
+  });
+
+/**
+ * Subscribe, run `trigger`, then return the first parent activity matching
+ * `match`. Subscribing first means the activity is observed whether it lands
+ * during or after the trigger.
+ */
+const parentActivityAfter = <A, E, R>(
+  parentId: ThreadId,
+  trigger: Effect.Effect<A, E, R>,
+  match: (activity: OrchestrationThreadActivity) => boolean,
+) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const events = yield* engine.subscribeDomainEvents;
+      yield* trigger;
+      return yield* events.pipe(
+        Stream.filter(
+          (event): event is Extract<OrchestrationEvent, { type: "thread.activity-appended" }> =>
+            event.type === "thread.activity-appended" &&
+            event.payload.threadId === parentId &&
+            match(event.payload.activity),
+        ),
+        Stream.map((event) => event.payload.activity),
+        Stream.runHead,
+      );
+    }),
+  );
+
+const payloadOf = (activity: OrchestrationThreadActivity | undefined) =>
+  Predicate.isObject(activity?.payload) ? activity.payload : {};
 
 const spawnSol = (caller: ThreadId, overrides?: Record<string, unknown>) =>
   Effect.gen(function* () {
@@ -416,6 +513,44 @@ describe("applyOutputCap", () => {
   });
 });
 
+describe("childTelemetryFromActivities", () => {
+  const row = (kind: string, payload: unknown): OrchestrationThreadActivity =>
+    ({
+      id: `a-${kind}`,
+      tone: "info",
+      kind,
+      summary: kind,
+      payload,
+      turnId: null,
+      createdAt: NOW,
+    }) as OrchestrationThreadActivity;
+
+  it("reads cumulative tokens, counts tool uses, and prefers the provider tool name", () => {
+    const telemetry = childTelemetryFromActivities([
+      row("context-window.updated", { usedTokens: 900 }),
+      row("tool.started", { title: "Command run", data: { toolName: "Bash" } }),
+      row("context-window.updated", { usedTokens: 400, totalProcessedTokens: 1500 }),
+      row("tool.started", { title: "Ran command" }),
+      row("context-window.updated", { usedTokens: 100, totalProcessedTokens: 1200 }),
+    ]);
+    assert.deepEqual(telemetry, {
+      usage: { totalTokens: 1500, toolUses: 2 },
+      lastToolName: "Ran command",
+    });
+  });
+
+  it("has no usage before any token report and honours a live tool floor", () => {
+    assert.deepEqual(childTelemetryFromActivities([], 3), {
+      usage: undefined,
+      lastToolName: undefined,
+    });
+    assert.deepEqual(
+      childTelemetryFromActivities([row("context-window.updated", { usedTokens: 10 })], 3).usage,
+      { totalTokens: 10, toolUses: 3 },
+    );
+  });
+});
+
 describe("call identity helpers", () => {
   it("derives stable, UUID-shaped ids from the caller, tool, and call id", () => {
     const key = crossProviderCallKey({
@@ -536,7 +671,13 @@ describe("CrossProviderAgentService", () => {
       assert.equal(child.branch, "feat/xp");
       assert.equal(child.worktreePath, "/tmp/xp-project/.worktrees/xp");
       assert.equal(child.runtimeMode, "full-access");
-      assert.deepEqual(child.modelSelection, { instanceId: CODEX, model: "gpt-5.6-sol" });
+      // No explicit effort: the Claude parent's default (high) is offered by
+      // the Codex target, so the child inherits it under Codex's option id.
+      assert.deepEqual(child.modelSelection, {
+        instanceId: CODEX,
+        model: "gpt-5.6-sol",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      });
 
       const childEvents = yield* readThreadEvents(childId);
       assert.deepEqual(
@@ -559,6 +700,7 @@ describe("CrossProviderAgentService", () => {
         title: "Risk review",
         role: "cross-provider",
         model: "gpt-5.6-sol",
+        effort: "high",
         timelineBypass: true,
         childThreadId: childId,
         providerInstanceId: CODEX,
@@ -941,6 +1083,207 @@ describe("CrossProviderAgentService", () => {
           completed.map((activity) => (activity.payload as { status: string }).status),
           ["completed", "stopped"],
         );
+      }).pipe(Effect.provide(makeLayer())),
+  );
+
+  it.effect(
+    "spawn resolves effort like a native spawn: explicit, inherited, default, or rejected",
+    () =>
+      Effect.gen(function* () {
+        yield* seedRoot();
+        const service = yield* CrossProviderAgentService;
+
+        // Explicit wins and is stored under the target driver's option id.
+        const explicit = yield* spawnSol(ROOT, { effort: "low" });
+        const explicitChild = yield* readShell(ThreadId.make(explicit.childId));
+        assert.deepEqual(explicitChild.modelSelection.options, [
+          { id: "reasoningEffort", value: "low" },
+        ]);
+        const explicitRow = (yield* readActivities(ROOT)).find(
+          (activity) =>
+            activity.kind === "task.started" &&
+            payloadOf(activity).childThreadId === explicit.childId,
+        );
+        assert.equal(payloadOf(explicitRow).effort, "low");
+
+        // A parent effort the target does not offer falls back to the
+        // target's default.
+        const maxParent = ThreadId.make("thread-max");
+        yield* seedRoot({ threadId: maxParent, options: [{ id: "effort", value: "max" }] });
+        const fromMax = yield* spawnSol(maxParent);
+        assert.deepEqual(
+          (yield* readShell(ThreadId.make(fromMax.childId))).modelSelection.options,
+          [{ id: "reasoningEffort", value: "medium" }],
+        );
+
+        // A Codex parent's explicit effort is inherited by a Claude child
+        // when Claude offers it.
+        const codexParent = ThreadId.make("thread-codex-parent");
+        yield* seedRoot({
+          threadId: codexParent,
+          instanceId: CODEX,
+          model: "gpt-5.6-sol",
+          options: [{ id: "reasoningEffort", value: "low" }],
+        });
+        const inherited = yield* service.spawn(codexParent, {
+          providerInstanceId: CLAUDE,
+          model: "claude-haiku-4-5",
+          prompt: "leaf",
+        });
+        if (isCrossProviderAgentErrorOutput(inherited))
+          return yield* Effect.die(inherited.error.code);
+        assert.deepEqual(
+          (yield* readShell(ThreadId.make(inherited.childId))).modelSelection.options,
+          [{ id: "effort", value: "low" }],
+        );
+
+        // Unsupported values are rejected before anything is created.
+        const before = (yield* readActivities(ROOT)).length;
+        const rejected = expectError(
+          yield* service.spawn(ROOT, {
+            providerInstanceId: CODEX,
+            model: "gpt-5.6-sol",
+            prompt: "x",
+            effort: "ultra",
+          }),
+          "invalid_input",
+        );
+        assert.equal(rejected.error.model, "gpt-5.6-sol");
+        assert.equal(rejected.error.providerInstanceId, CODEX);
+        assert.include(rejected.error.message, "low, medium, high, xhigh");
+        assert.equal((yield* readActivities(ROOT)).length, before);
+      }).pipe(Effect.provide(makeLayer())),
+  );
+
+  it.effect("a target model without an effort setting gets none and rejects an explicit one", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const plain = yield* service.spawn(ROOT, {
+        providerInstanceId: CODEX_API_KEY,
+        model: "glm-5.3-flash",
+        prompt: "no effort here",
+      });
+      if (isCrossProviderAgentErrorOutput(plain)) return yield* Effect.die(plain.error.code);
+      const child = yield* readShell(ThreadId.make(plain.childId));
+      assert.isUndefined(child.modelSelection.options);
+      assert.notProperty(
+        payloadOf(
+          (yield* readActivities(ROOT)).find((activity) => activity.kind === "task.started"),
+        ),
+        "effort",
+      );
+      const rejected = expectError(
+        yield* service.spawn(ROOT, {
+          providerInstanceId: CODEX_API_KEY,
+          model: "glm-5.3-flash",
+          prompt: "x",
+          effort: "high",
+        }),
+        "invalid_input",
+      );
+      assert.equal(rejected.error.model, "glm-5.3-flash");
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          providers: [
+            provider(CLAUDE, "claudeAgent", ["claude-fable-5-1"]),
+            provider(CODEX_API_KEY, "codex", ["glm-5.3-flash"], {
+              auth: { status: "unknown" },
+              models: [{ slug: "glm-5.3-flash", name: "GLM", isCustom: false, capabilities: null }],
+            }),
+          ],
+        }),
+      ),
+    ),
+  );
+
+  it.effect(
+    "the watcher mirrors child usage and tool activity onto the parent row, one update per second",
+    () =>
+      Effect.gen(function* () {
+        yield* seedRoot();
+        const service = yield* CrossProviderAgentService;
+        const handle = yield* spawnSol(ROOT);
+        const childId = ThreadId.make(handle.childId);
+        const usageId = `task-usage:${ROOT}:${handle.taskId}`;
+        const isUsageRow = (activity: OrchestrationThreadActivity) => activity.id === usageId;
+
+        // The first observation mirrors at once: cumulative tokens, no tools yet.
+        const first = yield* parentActivityAfter(
+          ROOT,
+          appendChildActivity(childId, "context-window.updated", {
+            usedTokens: 100,
+            totalProcessedTokens: 1200,
+          }),
+          isUsageRow,
+        );
+        assert.isTrue(Option.isSome(first));
+        assert.deepInclude(payloadOf(Option.getOrThrow(first)), {
+          taskId: handle.taskId,
+          usageSnapshot: true,
+          typedUsage: { totalTokens: 1200 },
+          effort: "high",
+          childThreadId: childId,
+        });
+
+        // Everything inside the same second coalesces into one later mirror
+        // that carries only the latest state.
+        yield* appendChildActivity(childId, "tool.started", {
+          itemType: "command_execution",
+          title: "Command run",
+          data: { toolName: "Bash" },
+        });
+        yield* appendChildActivity(childId, "context-window.updated", {
+          usedTokens: 300,
+          totalProcessedTokens: 2000,
+        });
+        yield* appendChildActivity(childId, "tool.started", {
+          itemType: "file_change",
+          title: "File change",
+          data: { toolName: "Read" },
+        });
+        const usageEventsBefore = (yield* readThreadEvents(ROOT)).filter(
+          (event) =>
+            event.type === "thread.activity-appended" && isUsageRow(event.payload.activity),
+        ).length;
+        assert.equal(usageEventsBefore, 1);
+        const toolRow = yield* parentActivityAfter(
+          ROOT,
+          TestClock.adjust("1 second"),
+          (activity) => activity.kind === "tool.progress",
+        );
+        assert.deepEqual(payloadOf(Option.getOrThrow(toolRow)), {
+          taskId: handle.taskId,
+          toolName: "Read",
+        });
+        const activities = yield* readActivities(ROOT);
+        const usage = activities.find(isUsageRow);
+        assert.deepEqual(payloadOf(usage).typedUsage, { totalTokens: 2000, toolUses: 2 });
+        const progress = activities.find(
+          (activity) => activity.id === `task-progress:${ROOT}:${handle.taskId}`,
+        );
+        assert.deepInclude(payloadOf(progress), { lastToolName: "Read", agentKind: "agent" });
+        assert.equal(activities.filter((activity) => activity.kind === "tool.progress").length, 1);
+        const usageEvents = (yield* readThreadEvents(ROOT)).filter(
+          (event) =>
+            event.type === "thread.activity-appended" && isUsageRow(event.payload.activity),
+        );
+        assert.equal(usageEvents.length, 2);
+
+        // Settlement carries the final cumulative usage on the completion row.
+        yield* tick;
+        yield* settleChild({ childId, turnId: "turn-1", text: "done" });
+        const settled = yield* service.wait(ROOT, { childIds: [childId] });
+        if (isCrossProviderAgentErrorOutput(settled)) return yield* Effect.die(settled.error.code);
+        const completed = (yield* readActivities(ROOT)).find(
+          (activity) => activity.kind === "task.completed",
+        );
+        assert.deepInclude(payloadOf(completed), {
+          status: "completed",
+          typedUsage: { totalTokens: 2000, toolUses: 2 },
+          effort: "high",
+        });
       }).pipe(Effect.provide(makeLayer())),
   );
 
