@@ -181,6 +181,7 @@ New `SettingsSection id="agents" title="Agents"` above Browser in `IntegrationsS
 4. **Routes** collapsed `Collapsible`: per eligible instance a switch and a model multi-select drawn from that instance's current catalog. Empty stored routes render the generated defaults. **Restore defaults** button with `AlertDialog` confirm ("Replace your route edits with the generated defaults?"). Generated defaults are computed on the server (`crossProviderAgentRoutes` empty ⇒ derive) so remote clients never compute policy locally.
 
 Mobile: the toggle only, if provider administration exists there; otherwise nothing. State which applied.
+**Applied:** mobile has no server-settings or provider-administration surface, so no mobile UI was added.
 
 ## 4. Behaviours and edge cases
 

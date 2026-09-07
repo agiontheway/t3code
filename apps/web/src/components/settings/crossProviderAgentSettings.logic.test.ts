@@ -1,4 +1,9 @@
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type CrossProviderAgentRoutes,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -11,6 +16,7 @@ import {
 const CLAUDE = ProviderInstanceId.make("claudeAgent");
 const CODEX = ProviderInstanceId.make("codex");
 const CURSOR = ProviderInstanceId.make("cursor");
+const PROBING = ProviderInstanceId.make("codex-probing");
 
 const provider = (
   instanceId: ProviderInstanceId,
@@ -32,52 +38,59 @@ const provider = (
   ...overrides,
 });
 
+// The client snapshot: one instance is mid-probe (auth unknown) yet the
+// SERVER already lists it as a candidate. Candidacy comes from the server.
 const providers = [
   provider(CLAUDE, "claudeAgent", ["haiku", "fable"]),
   provider(CODEX, "codex", ["sol", "luna"]),
   provider(CURSOR, "cursor", ["composer"]),
-  provider(ProviderInstanceId.make("codex-work"), "codex", ["sol"], {
-    auth: { status: "unauthenticated" },
-  }),
+  provider(PROBING, "codex", ["sol"], { auth: { status: "unknown" } }),
 ];
+const serverDefaults: CrossProviderAgentRoutes = {
+  [CLAUDE]: { enabled: true, models: [] },
+  [CODEX]: { enabled: true, models: [] },
+  [PROBING]: { enabled: true, models: [] },
+};
 
 describe("crossProviderAgentSettings.logic", () => {
-  it("renders generated defaults for candidates only when nothing is stored", () => {
-    const view = viewCrossProviderRoutes({}, providers);
+  it("renders the server's candidates, not a client-side derivation", () => {
+    const view = viewCrossProviderRoutes({}, serverDefaults, providers);
     expect(
       view.map((route) => [route.providerInstanceId, route.enabled, route.selectedModels]),
     ).toEqual([
       [CLAUDE, true, []],
       [CODEX, true, []],
+      [PROBING, true, []],
     ]);
     expect(hasCrossProviderRouteEdits({})).toBe(false);
   });
 
-  it("materialises the defaults on the first edit so other routes survive", () => {
-    const routes = setCrossProviderRouteEnabled({}, providers, CODEX, false);
+  it("materialises the server defaults on the first edit so other routes survive", () => {
+    const routes = setCrossProviderRouteEnabled({}, serverDefaults, CODEX, false);
     expect(routes).toEqual({
       [CLAUDE]: { enabled: true, models: [] },
       [CODEX]: { enabled: false, models: [] },
+      [PROBING]: { enabled: true, models: [] },
     });
     expect(hasCrossProviderRouteEdits(routes)).toBe(true);
-    expect(viewCrossProviderRoutes(routes, providers).map((route) => route.enabled)).toEqual([
-      true,
-      false,
-    ]);
+    // A candidate the server adds later renders disabled and can be enabled.
+    const later = { ...serverDefaults, [CURSOR]: { enabled: true, models: [] } };
+    const view = viewCrossProviderRoutes(routes, later, providers);
+    expect(view.find((route) => route.providerInstanceId === CURSOR)?.enabled).toBe(false);
   });
 
-  it("keeps model lists explicit while a subset and collapses back to all", () => {
-    const one = setCrossProviderRouteModel({}, providers, CODEX, "luna", false);
+  it("keeps model lists explicit while a subset and disables the route on the last uncheck", () => {
+    const one = setCrossProviderRouteModel({}, serverDefaults, providers, CODEX, "luna", false);
     expect(one[CODEX]).toEqual({ enabled: true, models: ["sol"] });
-    // The only remaining model cannot be unchecked: empty would mean "all".
-    expect(setCrossProviderRouteModel(one, providers, CODEX, "sol", false)).toBe(one);
-    const all = setCrossProviderRouteModel(one, providers, CODEX, "luna", true);
+    // Unchecking the only remaining model cannot mean "all": it turns the route off.
+    const off = setCrossProviderRouteModel(one, serverDefaults, providers, CODEX, "sol", false);
+    expect(off[CODEX]).toEqual({ enabled: false, models: [] });
+    const all = setCrossProviderRouteModel(one, serverDefaults, providers, CODEX, "luna", true);
     expect(all[CODEX]).toEqual({ enabled: true, models: [] });
     // Catalog order is preserved regardless of the order models were re-added.
-    const none = setCrossProviderRouteModel(one, providers, CLAUDE, "haiku", false);
-    expect(setCrossProviderRouteModel(none, providers, CLAUDE, "haiku", true)[CLAUDE]).toEqual({
-      enabled: true,
-      models: [],
-    });
+    const none = setCrossProviderRouteModel({}, serverDefaults, providers, CLAUDE, "haiku", false);
+    expect(
+      setCrossProviderRouteModel(none, serverDefaults, providers, CLAUDE, "haiku", true)[CLAUDE],
+    ).toEqual({ enabled: true, models: [] });
   });
 });

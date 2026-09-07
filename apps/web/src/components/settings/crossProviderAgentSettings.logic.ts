@@ -4,10 +4,6 @@ import type {
   ProviderInstanceId,
   ServerProvider,
 } from "@t3tools/contracts";
-import {
-  deriveDefaultCrossProviderAgentRoutes,
-  isCrossProviderAgentCandidate,
-} from "@t3tools/shared/crossProviderAgentRoutes";
 
 /**
  * One row of the route editor. `selectedModels` empty means every model in
@@ -28,44 +24,52 @@ export function hasCrossProviderRouteEdits(routes: CrossProviderAgentRoutes): bo
 }
 
 /**
- * The map an edit starts from. Editing the generated defaults must first
- * materialise them, otherwise the first switch would leave every other
- * candidate route out of the stored map and silently disable it.
+ * The map an edit starts from. `defaults` is the server's generated map
+ * (`ServerConfig.crossProviderAgentRouteDefaults`); the client never derives
+ * candidacy from its own provider snapshot, which can be partial or mid-probe.
+ * Editing the defaults materialises them first so the first switch does not
+ * silently drop every other candidate route from the stored map.
  */
 export function materializeCrossProviderRoutes(
   routes: CrossProviderAgentRoutes,
-  providers: ReadonlyArray<ServerProvider>,
+  defaults: CrossProviderAgentRoutes,
 ): CrossProviderAgentRoutes {
-  return hasCrossProviderRouteEdits(routes)
-    ? routes
-    : deriveDefaultCrossProviderAgentRoutes(providers);
+  return hasCrossProviderRouteEdits(routes) ? routes : defaults;
 }
 
+/**
+ * Rows are the server's candidates (the keys of `defaults`), drawn with the
+ * provider snapshot's names and catalogs. A candidate missing from an edited
+ * map renders disabled and can be switched on.
+ */
 export function viewCrossProviderRoutes(
   routes: CrossProviderAgentRoutes,
+  defaults: CrossProviderAgentRoutes,
   providers: ReadonlyArray<ServerProvider>,
 ): ReadonlyArray<CrossProviderRouteView> {
-  const effective = materializeCrossProviderRoutes(routes, providers);
-  return providers.filter(isCrossProviderAgentCandidate).map((provider) => {
-    const route = effective[provider.instanceId];
-    return {
-      providerInstanceId: provider.instanceId,
-      displayName: provider.displayName ?? provider.instanceId,
-      driver: provider.driver,
-      enabled: route?.enabled ?? false,
-      catalog: provider.models.map((model) => ({ slug: model.slug, name: model.name })),
-      selectedModels: route?.models ?? [],
-    };
-  });
+  const effective = materializeCrossProviderRoutes(routes, defaults);
+  return providers
+    .filter((provider) => provider.instanceId in defaults)
+    .map((provider) => {
+      const route = effective[provider.instanceId];
+      return {
+        providerInstanceId: provider.instanceId,
+        displayName: provider.displayName ?? provider.instanceId,
+        driver: provider.driver,
+        enabled: route?.enabled ?? false,
+        catalog: provider.models.map((model) => ({ slug: model.slug, name: model.name })),
+        selectedModels: route?.models ?? [],
+      };
+    });
 }
 
 export function setCrossProviderRouteEnabled(
   routes: CrossProviderAgentRoutes,
-  providers: ReadonlyArray<ServerProvider>,
+  defaults: CrossProviderAgentRoutes,
   providerInstanceId: ProviderInstanceId,
   enabled: boolean,
 ): CrossProviderAgentRoutes {
-  const base = materializeCrossProviderRoutes(routes, providers);
+  const base = materializeCrossProviderRoutes(routes, defaults);
   return {
     ...base,
     [providerInstanceId]: { enabled, models: base[providerInstanceId]?.models ?? [] },
@@ -75,17 +79,19 @@ export function setCrossProviderRouteEnabled(
 /**
  * Toggle one model on a route. The stored list stays explicit while it is a
  * strict subset of the catalog and collapses back to "all" (empty) when the
- * user re-checks the last one. Unchecking the only selected model is a no-op:
- * an empty list would mean "all", the opposite of what was asked.
+ * user re-checks the last one. Unchecking the only selected model disables
+ * the route instead: an empty list would mean "all", the opposite of what
+ * was asked, and the route switch is the way back.
  */
 export function setCrossProviderRouteModel(
   routes: CrossProviderAgentRoutes,
+  defaults: CrossProviderAgentRoutes,
   providers: ReadonlyArray<ServerProvider>,
   providerInstanceId: ProviderInstanceId,
   slug: string,
   checked: boolean,
 ): CrossProviderAgentRoutes {
-  const base = materializeCrossProviderRoutes(routes, providers);
+  const base = materializeCrossProviderRoutes(routes, defaults);
   const catalog =
     providers
       .find((provider) => provider.instanceId === providerInstanceId)
@@ -95,7 +101,9 @@ export function setCrossProviderRouteModel(
   const next = checked
     ? catalog.filter((candidate) => candidate === slug || current.includes(candidate))
     : current.filter((candidate) => candidate !== slug);
-  if (next.length === 0) return routes;
+  if (next.length === 0) {
+    return { ...base, [providerInstanceId]: { enabled: false, models: [] } };
+  }
   const models = next.length === catalog.length ? [] : next;
   return { ...base, [providerInstanceId]: { enabled: route.enabled, models } };
 }

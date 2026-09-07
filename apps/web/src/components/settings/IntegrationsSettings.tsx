@@ -23,6 +23,7 @@ import {
   DEFAULT_PREVIEW_ZOOM_FACTOR,
   DEFAULT_UNIFIED_SETTINGS,
   MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS,
+  type CrossProviderAgentRoutes,
   type ProviderInstanceId,
   FILL_PREVIEW_VIEWPORT,
   PREVIEW_VIEWPORT_MAX_AREA,
@@ -37,17 +38,21 @@ import {
   type PreviewViewportSetting,
 } from "@t3tools/contracts";
 import { PREVIEW_VIEWPORT_PRESETS } from "@t3tools/shared/previewViewport";
-import { useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { Link } from "@tanstack/react-router";
 import { ChevronRightIcon, InfoIcon, MoreVertical, Plus as PlusIcon } from "lucide-react";
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ScreenRotationIcon } from "~/browser/ScreenRotationIcon";
 import { resolveEnvironmentOptionLabel } from "~/components/BranchToolbar.logic";
 import { previewBridge } from "~/components/preview/previewBridge";
 import { cn, randomUUID } from "~/lib/utils";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
-import { primaryServerProvidersAtom } from "~/state/server";
+import {
+  primaryServerCrossProviderRouteDefaultsAtom,
+  primaryServerProvidersAtom,
+  primaryServerSettingsAtom,
+} from "~/state/server";
 import { isElectron } from "../../env";
 
 import { Badge } from "../ui/badge";
@@ -1252,8 +1257,13 @@ function CrossProviderAgentMaxDepthSetting() {
           size="sm"
           className="w-20"
           onValueCommitted={(value) => {
-            if (value === null || !Number.isInteger(value)) return;
-            updateSettings({ crossProviderAgentMaxDepth: value });
+            if (value === null || !Number.isFinite(value)) return;
+            updateSettings({
+              crossProviderAgentMaxDepth: Math.min(
+                CROSS_PROVIDER_AGENT_MAX_DEPTH_LIMIT,
+                Math.max(1, Math.round(value)),
+              ),
+            });
           }}
         >
           <NumberFieldGroup>
@@ -1295,8 +1305,13 @@ function CrossProviderAgentOutputCapSetting() {
           size="sm"
           className="w-24"
           onValueCommitted={(value) => {
-            if (value === null || !Number.isInteger(value)) return;
-            updateSettings({ crossProviderAgentOutputCapChars: value });
+            if (value === null || !Number.isFinite(value)) return;
+            updateSettings({
+              crossProviderAgentOutputCapChars: Math.max(
+                MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS,
+                Math.round(value),
+              ),
+            });
           }}
         >
           <NumberFieldGroup>
@@ -1317,14 +1332,37 @@ function CrossProviderAgentOutputCapSetting() {
  */
 function CrossProviderAgentRoutesSetting() {
   const routes = usePrimarySettings((settings) => settings.crossProviderAgentRoutes);
+  const defaults = useAtomValue(primaryServerCrossProviderRouteDefaultsAtom);
   const providers = useAtomValue(primaryServerProvidersAtom);
+  const registry = useContext(RegistryContext);
   const updateSettings = useUpdatePrimarySettings();
   const editable = usePrimarySettingsAvailable();
   const [open, setOpen] = useState(false);
   const [restoreOpen, setRestoreOpen] = useState(false);
-  const view = viewCrossProviderRoutes(routes, providers);
-  const edited = hasCrossProviderRouteEdits(routes);
-  const enabledCount = view.filter((route) => route.enabled).length;
+  const view = useMemo(
+    () => viewCrossProviderRoutes(routes, defaults, providers),
+    [routes, defaults, providers],
+  );
+  const edited = useMemo(() => hasCrossProviderRouteEdits(routes), [routes]);
+  const enabledCount = useMemo(() => view.filter((route) => route.enabled).length, [view]);
+  // Whole-map replacement: compose every patch from the settings the server
+  // holds right now, not from this render's closure, so two open settings
+  // clients cannot clobber each other's edits with a stale map.
+  const patchRoutes = useCallback(
+    (
+      next: (
+        current: CrossProviderAgentRoutes,
+        defaults: CrossProviderAgentRoutes,
+      ) => CrossProviderAgentRoutes,
+    ) => {
+      const freshSettings = registry.get(primaryServerSettingsAtom);
+      const freshDefaults = registry.get(primaryServerCrossProviderRouteDefaultsAtom);
+      updateSettings({
+        crossProviderAgentRoutes: next(freshSettings.crossProviderAgentRoutes, freshDefaults),
+      });
+    },
+    [registry, updateSettings],
+  );
 
   return (
     <SettingsRow
@@ -1376,14 +1414,14 @@ function CrossProviderAgentRoutesSetting() {
                         checked={route.enabled}
                         disabled={!editable}
                         onCheckedChange={(checked) =>
-                          updateSettings({
-                            crossProviderAgentRoutes: setCrossProviderRouteEnabled(
-                              routes,
-                              providers,
+                          patchRoutes((current, currentDefaults) =>
+                            setCrossProviderRouteEnabled(
+                              current,
+                              currentDefaults,
                               route.providerInstanceId,
                               Boolean(checked),
                             ),
-                          })
+                          )
                         }
                         aria-label={`Allow agents to target ${route.displayName}`}
                       />
@@ -1403,15 +1441,16 @@ function CrossProviderAgentRoutesSetting() {
                                 checked={checked}
                                 disabled={!editable}
                                 onCheckedChange={(next) =>
-                                  updateSettings({
-                                    crossProviderAgentRoutes: setCrossProviderRouteModel(
-                                      routes,
+                                  patchRoutes((current, currentDefaults) =>
+                                    setCrossProviderRouteModel(
+                                      current,
+                                      currentDefaults,
                                       providers,
                                       route.providerInstanceId as ProviderInstanceId,
                                       model.slug,
                                       Boolean(next),
                                     ),
-                                  })
+                                  )
                                 }
                                 aria-label={`${model.name} on ${route.displayName}`}
                               />
