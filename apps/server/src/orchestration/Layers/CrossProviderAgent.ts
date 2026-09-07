@@ -57,7 +57,6 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 
 import { ServerSettingsService } from "../../serverSettings.ts";

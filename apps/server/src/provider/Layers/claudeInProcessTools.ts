@@ -2,7 +2,6 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import type { ThreadId } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 import { z } from "zod";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 
 import {
