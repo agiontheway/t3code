@@ -3506,7 +3506,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context.turnState.hasSubagents = true;
         }
         // Model/effort: the Agent tool's input carries explicit overrides;
-        // absent ones inherit the session's selection (SDK behavior).
+        // absent models preserve the same task's selection on SendMessage
+        // reactivation, or inherit the session's selection for new tasks.
         // Subagent assistant snapshots refine model with the authoritative API
         // id: one that already arrived is buffered and outranks the seed here,
         // later ones refine the record in place. AgentInput.effort may be a
@@ -3520,6 +3521,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const model =
           bufferedModel ??
           trimmedString(launchInput?.model) ??
+          context.taskAgents.get(message.task_id)?.model ??
           trimmedString(context.session.model ?? undefined);
         const rawLaunchEffort = launchInput?.effort;
         const effort =

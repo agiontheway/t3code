@@ -3519,6 +3519,147 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect.each([
+    {
+      name: "preserves the resolved child model without an override",
+      launchModel: undefined,
+      bufferedModel: undefined,
+      expectedModel: SYNTHETIC_SUBAGENT_MODEL,
+    },
+    {
+      name: "prefers an explicit override to the previous child model",
+      launchModel: SYNTHETIC_CLAUDE_THINKING_MODEL,
+      bufferedModel: undefined,
+      expectedModel: SYNTHETIC_CLAUDE_THINKING_MODEL,
+    },
+    {
+      name: "prefers a buffered snapshot to both the override and previous child model",
+      launchModel: SYNTHETIC_CLAUDE_THINKING_MODEL,
+      bufferedModel: "claude-synthetic-followup",
+      expectedModel: "claude-synthetic-followup",
+    },
+  ])("SendMessage reactivation $name", ({ launchModel, bufferedModel, expectedModel }) => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const taskEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "task.started" ||
+            event.type === "task.progress" ||
+            event.type === "task.completed",
+        ),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+        ),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "spawn an agent and follow up",
+        attachments: [],
+      });
+
+      for (const phase of ["launch", "followup"] as const) {
+        const toolUseId = `toolu-model-${phase}`;
+        harness.query.emit({
+          type: "stream_event",
+          session_id: "sdk-session",
+          uuid: `tool-${phase}`,
+          parent_tool_use_id: null,
+          event: {
+            type: "content_block_start",
+            index: phase === "launch" ? 0 : 1,
+            content_block: {
+              type: "tool_use",
+              id: toolUseId,
+              name: phase === "launch" ? "Agent" : "SendMessage",
+              input:
+                phase === "launch"
+                  ? { prompt: "Review the changes", model: SYNTHETIC_CLAUDE_STANDARD_MODEL }
+                  : {
+                      to: "task-model-followup",
+                      message: "Check the tests too",
+                      ...(launchModel ? { model: launchModel } : {}),
+                    },
+            },
+          },
+        } as unknown as SDKMessage);
+        if (phase === "followup" && bufferedModel) {
+          harness.query.emit({
+            type: "assistant",
+            parent_tool_use_id: toolUseId,
+            message: { model: bufferedModel, content: [] },
+            uuid: "buffered-followup-snapshot",
+            session_id: "sdk-session",
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "system",
+          subtype: "task_started",
+          task_id: "task-model-followup",
+          description: "Review changes",
+          task_type: "local_agent",
+          tool_use_id: toolUseId,
+          uuid: `task-started-${phase}`,
+          session_id: "sdk-session",
+        } as unknown as SDKMessage);
+        if (phase === "launch") {
+          harness.query.emit({
+            type: "assistant",
+            parent_tool_use_id: toolUseId,
+            message: { model: SYNTHETIC_SUBAGENT_MODEL, content: [] },
+            uuid: "resolved-child-snapshot",
+            session_id: "sdk-session",
+          } as unknown as SDKMessage);
+        } else {
+          harness.query.emit({
+            type: "system",
+            subtype: "task_progress",
+            task_id: "task-model-followup",
+            description: "Checking tests",
+            usage: { total_tokens: 100, tool_uses: 1, duration_ms: 10 },
+            uuid: "task-progress-followup",
+            session_id: "sdk-session",
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "system",
+          subtype: "task_notification",
+          task_id: "task-model-followup",
+          status: "completed",
+          summary: "Review complete",
+          uuid: `task-completed-${phase}`,
+          session_id: "sdk-session",
+        } as unknown as SDKMessage);
+      }
+
+      const taskEvents = Array.from(yield* Fiber.join(taskEventsFiber));
+      assert.deepEqual(
+        taskEvents.map((event) => [event.type, event.payload.taskId, event.payload.model]),
+        [
+          ["task.started", "task-model-followup", SYNTHETIC_CLAUDE_STANDARD_MODEL],
+          ["task.completed", "task-model-followup", SYNTHETIC_SUBAGENT_MODEL],
+          ["task.started", "task-model-followup", expectedModel],
+          ["task.progress", "task-model-followup", expectedModel],
+          ["task.completed", "task-model-followup", expectedModel],
+        ],
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("a subagent snapshot that beats task_started still wins over the seed", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
