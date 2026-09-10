@@ -157,10 +157,11 @@ interface ClaudeTurnState {
   /**
    * True for turns auto-started by assistant output arriving without an
    * active turn (background agent/subagent responses between user prompts).
-   * Synthetic turns are auto-closed by the next sendTurn; real turns are
-   * steered instead (the queued message continues the same turn).
+   * Synthetic turns are auto-closed by the next sendTurn unless a native
+   * question or approval makes the continuation live. Live turns are steered
+   * instead, including while the SDK resumes after a callback answer.
    */
-  readonly synthetic?: boolean;
+  synthetic?: boolean;
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
@@ -4242,6 +4243,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           readonly toolUseID?: string;
         },
       ) {
+        // Promote before yielding: incoming input must not close the turn and
+        // dismiss a question whose native callback is still waiting.
+        if (context.turnState?.synthetic === true) {
+          context.turnState.synthetic = false;
+        }
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
 
         // Parse questions from the SDK's AskUserQuestion input.
@@ -4504,6 +4510,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } satisfies PermissionResult;
         }
 
+        // Approval callbacks own live work just like native questions.
+        if (context.turnState?.synthetic === true) {
+          context.turnState.synthetic = false;
+        }
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
         const requestType = classifyRequestType(toolName);
         const detail = summarizeToolRequest(toolName, toolInput);

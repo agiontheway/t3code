@@ -61,14 +61,14 @@ export const CROSS_PROVIDER_AGENT_TOOL_DESCRIPTIONS: Record<CrossProviderAgentTo
     "List the provider instances and exact model ids you may spawn cross-provider children on, plus your orchestration depth. Entries flagged isCallerInstance are your own instance and cannot be targeted. " +
     SAME_INSTANCE_NOTE,
   agent_spawn:
-    "Create and start ONE child thread on an exact different provider instance with the given prompt. The child inherits your project, worktree, branch, and permission mode. Returns a durable childId; use agent_wait to collect its result. Set allowOrchestration only when the child must itself delegate further (costs one depth level). Omit effort to inherit your own reasoning effort when the target model offers it (otherwise the target's default); an effort the target model does not offer is rejected. " +
+    "Create and start ONE child thread on an exact different provider instance with the given prompt. The child inherits your project, worktree, branch, and permission mode. Returns a durable childId; terminal status and final output are automatically delivered to your conversation when the child settles. Set allowOrchestration only when the child must itself delegate further (costs one depth level). Omit effort to inherit your own reasoning effort when the target model offers it (otherwise the target's default); an effort the target model does not offer is rejected. " +
     SAME_INSTANCE_NOTE,
   agent_wait:
-    "Block until the given owned children settle (completed, error, or interrupted) or timeoutSeconds elapses, then return each child's state and final output. Waits on T3 events; call again with the unsettled ids to keep waiting. Long outputs are returned as head + tail with truncated:true; fetch the rest with agent_result.",
+    "Intentionally block until the given owned children settle (completed, error, or interrupted) or timeoutSeconds elapses, then return each child's state and final output. Automatic completion delivery does not require this tool and does not cancel an intentional wait. Waits on T3 events; call again with the unsettled ids to keep waiting. Long outputs are returned as head + tail with truncated:true; fetch the rest with agent_result.",
   agent_result:
-    "Read the stored final output of an owned settled child, optionally a character range (offset, limit). Use after agent_wait reported truncated:true, or after a restart.",
+    "Read the stored final output of an owned settled child, optionally a character range (offset, limit). Use when an automatically delivered result or agent_wait reports truncated:true, or to recover stored output after a restart or missed delivery.",
   agent_follow_up:
-    "Start another turn on an owned settled child with a new prompt (same thread, same provider instance and model). Returns immediately; use agent_wait to collect the result.",
+    "Start another turn on an owned settled child with a new prompt (same thread, same provider instance and model). Returns immediately; terminal status and final output are automatically delivered when this turn settles. Use agent_wait only when you intentionally need to block.",
   agent_interrupt:
     "Interrupt an owned child that is currently running. The child settles as interrupted; you may follow it up later.",
 };

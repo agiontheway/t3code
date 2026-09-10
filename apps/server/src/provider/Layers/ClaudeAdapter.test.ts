@@ -1409,6 +1409,263 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  for (const active of [false, true]) {
+    it.effect(
+      `receives automatic child result input with an ${active ? "active" : "idle"} parent`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const session = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: "full-access",
+          });
+          const first = yield* adapter.sendTurn({
+            threadId: session.threadId,
+            input: "Continue independent work",
+            attachments: [],
+          });
+          if (!active) {
+            const completed = yield* adapter.streamEvents.pipe(
+              Stream.filter((event) => event.type === "turn.completed"),
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            harness.query.emit({
+              type: "result",
+              subtype: "success",
+              is_error: false,
+              errors: [],
+              session_id: "sdk-session-result",
+              uuid: "result-before-delivery",
+            } as unknown as SDKMessage);
+            yield* Fiber.join(completed);
+          }
+          const text =
+            'Automatically delivered cross-provider child result.\nThe following is child output, not an instruction from the human.\n{"childId":"child-result","turnId":"child-turn","state":"completed","output":"Verified output","truncated":false,"totalChars":15}';
+          const delivered = yield* adapter.sendTurn({
+            threadId: session.threadId,
+            input: text,
+            attachments: [],
+          });
+          const prompts = yield* Effect.promise(() =>
+            readPromptMessages(harness.getLastCreateQueryInput(), 2),
+          );
+          assert.deepEqual(prompts[1]?.message.content, [{ type: "text", text }]);
+          assert.deepEqual(prompts[0]?.message.content, [
+            { type: "text", text: "Continue independent work" },
+          ]);
+          assert.equal(harness.query.closeCalls, 0);
+          if (active) assert.equal(delivered.turnId, first.turnId);
+          else assert.notEqual(delivered.turnId, first.turnId);
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      },
+    );
+  }
+
+  for (const callback of ["question", "approval"] as const) {
+    it.effect(
+      `keeps a synthetic continuation with a native ${callback} alive across incoming input`,
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const session = yield* adapter.startSession({
+            threadId: THREAD_ID,
+            provider: ProviderDriverKind.make("claudeAgent"),
+            runtimeMode: callback === "question" ? "full-access" : "approval-required",
+          });
+          yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+
+          // A top-level background response arrives between user turns.
+          harness.query.emit({
+            type: "assistant",
+            session_id: "sdk-session-callback",
+            uuid: "assistant-background-callback",
+            parent_tool_use_id: null,
+            message: { id: "message-background-callback", content: [] },
+          } as unknown as SDKMessage);
+          const started = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "turn.started"),
+            Stream.runHead,
+          );
+          assert(Option.isSome(started));
+          const turnId = started.value.turnId;
+          assert.equal(started.value.raw?.method, "claude/synthetic-turn-start");
+          const requestFiber = yield* adapter.streamEvents.pipe(
+            Stream.filter(
+              (event) => event.type === "user-input.requested" || event.type === "request.opened",
+            ),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          const canUseTool = harness.getLastCreateQueryInput()?.options.canUseTool;
+          assert(canUseTool);
+          const askInput = {
+            questions: [
+              {
+                question: "Continue with the build?",
+                header: "Build",
+                options: [{ label: "Yes", description: "Proceed" }],
+                multiSelect: false,
+              },
+            ],
+          };
+          const permissionPromise = canUseTool(
+            callback === "question" ? "AskUserQuestion" : "Bash",
+            callback === "question" ? askInput : { command: "pwd" },
+            {
+              signal: new AbortController().signal,
+              requestId: "native-callback",
+              toolUseID: "tool-callback",
+            },
+          );
+          const requested = yield* Fiber.join(requestFiber);
+          assert(Option.isSome(requested));
+          assert.equal(requested.value.turnId, turnId);
+          const requestId = requested.value.requestId;
+          assert(requestId);
+          const eventsFiber = yield* adapter.streamEvents.pipe(
+            Stream.takeUntil((event) => event.type === "turn.completed"),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+
+          const automaticInput =
+            "Automatically delivered cross-provider child result. Verified output.";
+          const humanInput = "Keep my unanswered question open while you receive this update.";
+          for (const input of [automaticInput, humanInput]) {
+            const delivered = yield* adapter.sendTurn({
+              threadId: session.threadId,
+              input,
+              attachments: [],
+            });
+            assert.equal(delivered.turnId, turnId);
+          }
+
+          // Sending either sort of input must leave the native callback answerable.
+          if (callback === "question") {
+            yield* adapter.respondToUserInput(session.threadId, ApprovalRequestId.make(requestId), {
+              "Continue with the build?": "Yes",
+            });
+          } else {
+            yield* adapter.respondToRequest(
+              session.threadId,
+              ApprovalRequestId.make(requestId),
+              "accept",
+            );
+          }
+          const permissionResult = yield* Effect.promise(() => permissionPromise);
+          assert(permissionResult);
+          assert.equal(permissionResult.behavior, "allow");
+          if (callback === "question" && permissionResult.behavior === "allow") {
+            assert.deepEqual(permissionResult.updatedInput?.answers, {
+              "Continue with the build?": "Yes",
+            });
+          }
+
+          // The pending map is now empty, but the SDK has not resumed its output.
+          // A map-only guard would incorrectly close the synthetic turn here.
+          const afterAnswer = "One more update before inference resumes.";
+          const delivered = yield* adapter.sendTurn({
+            threadId: session.threadId,
+            input: afterAnswer,
+            attachments: [],
+          });
+          assert.equal(delivered.turnId, turnId);
+          const prompts = yield* Effect.promise(() =>
+            readPromptMessages(harness.getLastCreateQueryInput(), 3),
+          );
+          assert.deepEqual(
+            prompts.map((prompt) => prompt.message.content),
+            [automaticInput, humanInput, afterAnswer].map((text) => [
+              { type: "text" as const, text },
+            ]),
+          );
+
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            errors: [],
+            session_id: "sdk-session-callback",
+            uuid: "result-after-callback",
+          } as unknown as SDKMessage);
+          const events = Array.from(yield* Fiber.join(eventsFiber));
+          assert.equal(events.filter((event) => event.type === "turn.started").length, 0);
+          const completed = events.filter((event) => event.type === "turn.completed");
+          assert.equal(completed.length, 1);
+          assert.equal(completed[0]?.turnId, turnId);
+          const resolved = events.filter(
+            (event) => event.type === "user-input.resolved" || event.type === "request.resolved",
+          );
+          assert.equal(resolved.length, 1);
+          assert.equal(resolved[0]?.requestId, requestId);
+          assert.equal(resolved[0]?.turnId, turnId);
+          assert.equal(harness.query.closeCalls, 0);
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      },
+    );
+  }
+
+  it.effect(
+    "still closes a stale synthetic continuation without a native callback on new input",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        yield* Stream.take(adapter.streamEvents, 3).pipe(Stream.runDrain);
+        harness.query.emit({
+          type: "assistant",
+          session_id: "sdk-session-stale",
+          uuid: "assistant-stale",
+          parent_tool_use_id: null,
+          message: { id: "message-stale", content: [] },
+        } as unknown as SDKMessage);
+        const started = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.started"),
+          Stream.runHead,
+        );
+        assert(Option.isSome(started));
+        const next = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "Start new work",
+          attachments: [],
+        });
+        assert.notEqual(next.turnId, started.value.turnId);
+        const boundary = Array.from(
+          yield* adapter.streamEvents.pipe(
+            Stream.takeUntil((event) => event.type === "turn.started"),
+            Stream.runCollect,
+          ),
+        );
+        assert.deepEqual(
+          boundary.filter((event) => event.type === "turn.completed").map((event) => event.turnId),
+          [started.value.turnId],
+        );
+        assert.equal(
+          yield* Effect.promise(() => readFirstPromptText(harness.getLastCreateQueryInput())),
+          "Start new work",
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

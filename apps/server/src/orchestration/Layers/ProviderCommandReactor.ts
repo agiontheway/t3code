@@ -1440,9 +1440,46 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.tap((turn) =>
+        thread.spawn === undefined
+          ? Effect.void
+          : Effect.gen(function* () {
+              const createdAt = DateTime.formatIso(yield* DateTime.now);
+              // Native sendTurn is the acknowledgement: Claude can consume this
+              // message within the current turn, while Codex can return a queued one.
+              const key = `${thread.id}:${event.payload.messageId}`;
+              yield* orchestrationEngine.dispatch({
+                type: "thread.activity.append",
+                commandId: CommandId.make(`server:provider-input-accepted:${key}`),
+                threadId: thread.id,
+                activity: {
+                  id: EventId.make(`provider-input-accepted:${key}`),
+                  kind: "provider.turn.input.accepted",
+                  tone: "info",
+                  summary: "Provider accepted cross-provider thread input",
+                  payload: { messageId: event.payload.messageId },
+                  turnId: turn.turnId,
+                  createdAt,
+                },
+                createdAt,
+              });
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.void
+                  : Effect.logWarning("provider input acknowledgement failed", {
+                      threadId: thread.id,
+                      messageId: event.payload.messageId,
+                      cause: Cause.pretty(cause),
+                    }),
+              ),
+            ),
+      ),
+      Effect.asVoid,
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

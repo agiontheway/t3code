@@ -64,6 +64,7 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { makeSqlStatementCounter } from "../../../integration/SqlStatementCounter.integration.ts";
+import { derivePendingRequests } from "../../../../../packages/client-runtime/src/pendingRequests.ts";
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
@@ -2596,6 +2597,86 @@ describe("ProviderRuntimeIngestion", () => {
     };
   }
 
+  it("keeps a live native question pending across incoming input until its callback resolves", async () => {
+    const harness = await createHarness();
+    const request = userInputEvent("live-question-turn", "live-question");
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId("live-question-started"),
+        provider: request.provider,
+        threadId: request.threadId,
+        turnId: request.turnId,
+        createdAt: request.createdAt,
+      },
+      request,
+    ]);
+    const assertPendingQuestion = async () => {
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session?.activeTurnId).toBe(request.turnId);
+      expect((await harness.readThreadShell()).hasPendingUserInput).toBe(true);
+      expect(derivePendingRequests(thread.activities).userInputs).toMatchObject([
+        { requestId: request.requestId, dismissible: false },
+      ]);
+      expect(
+        thread.activities.filter((activity) => activity.kind === "user-input.resolved"),
+      ).toHaveLength(0);
+    };
+    await assertPendingQuestion();
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("live-question-incoming-input"),
+      threadId: request.threadId,
+      message: {
+        messageId: asMessageId("xp-agent:result-delivery:live-question"),
+        role: "user",
+        text: "Automatically delivered cross-provider child result.",
+        attachments: [],
+      },
+      runtimeMode: "approval-required",
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+    await harness.emitAndDrain([
+      {
+        type: "task.completed",
+        eventId: asEventId("live-question-child-completed"),
+        provider: request.provider,
+        threadId: request.threadId,
+        turnId: request.turnId,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { taskId: "live-question-child", status: "completed" },
+      },
+    ]);
+    await assertPendingQuestion();
+
+    await harness.emitAndDrain([
+      {
+        type: "user-input.resolved",
+        eventId: asEventId("live-question-answered"),
+        provider: request.provider,
+        threadId: request.threadId,
+        turnId: request.turnId,
+        requestId: request.requestId,
+        createdAt: "2026-01-01T00:00:04.000Z",
+        payload: { answers: { first: "yes", second: "yes" } },
+      },
+    ]);
+    const answered = (await harness.readModel()).threads[0]!;
+    expect(answered.session?.activeTurnId).toBe(request.turnId);
+    expect((await harness.readThreadShell()).hasPendingUserInput).toBe(false);
+    expect(derivePendingRequests(answered.activities).userInputs).toHaveLength(0);
+    expect(
+      answered.activities.filter((activity) => activity.kind === "user-input.resolved"),
+    ).toMatchObject([
+      {
+        id: "live-question-answered",
+        payload: { requestId: request.requestId, answers: { first: "yes", second: "yes" } },
+      },
+    ]);
+  });
+
   it.each(["completed", "interrupted", "failed", "aborted"] as const)(
     "resolves native questions when their turn is %s",
     async (state) => {
@@ -2635,6 +2716,7 @@ describe("ProviderRuntimeIngestion", () => {
       const thread = (await harness.readModel()).threads[0]!;
       expect(thread.session?.activeTurnId).toBeNull();
       expect((await harness.readThreadShell()).hasPendingUserInput).toBe(false);
+      expect(derivePendingRequests(thread.activities).userInputs).toHaveLength(0);
       expect(
         thread.activities.filter((activity) => activity.kind === "user-input.resolved"),
       ).toMatchObject([{ turnId: request.turnId, payload: { requestId: request.requestId } }]);
