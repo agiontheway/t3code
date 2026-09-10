@@ -1,4 +1,10 @@
 import {
+  CROSS_PROVIDER_RESULT_REQUESTED,
+  CROSS_PROVIDER_INPUT_ACCEPTED,
+  isResultDeliveryPending,
+  readCrossProviderResultDelivery,
+} from "../crossProviderResultDelivery.ts";
+import {
   type ChatAttachment,
   CommandId,
   EventId,
@@ -67,6 +73,7 @@ type ProviderIntentEvent = Extract<
       | "thread.meta-updated"
       | "thread.runtime-mode-set"
       | "thread.turn-start-requested"
+      | "thread.activity-appended"
       | "thread.turn-interrupt-requested"
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
@@ -1482,6 +1489,141 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const appendCrossProviderDeliveryFailure = Effect.fn("appendCrossProviderDeliveryFailure")(
+    function* (threadId: ThreadId, requestId: string, detail: string) {
+      const createdAt = DateTime.formatIso(yield* DateTime.now);
+      const key = `${threadId}:${requestId}`;
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`server:provider-input-failed:${key}`),
+        threadId,
+        activity: {
+          id: EventId.make(`provider-input-failed:${key}`),
+          kind: "provider.turn.start.failed",
+          tone: "error",
+          summary: "Cross-provider result delivery failed",
+          payload: { requestId, detail },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+    },
+  );
+
+  const processCrossProviderResultRequested = Effect.fn("processCrossProviderResultRequested")(
+    function* (event: Extract<ProviderIntentEvent, { type: "thread.activity-appended" }>) {
+      const activity = event.payload.activity;
+      const delivery = readCrossProviderResultDelivery(activity);
+      if (
+        Option.isNone(delivery) ||
+        event.commandId !== `server:${activity.id}` ||
+        (yield* hasHandledTurnStartRecently(turnStartKeyForEvent(event)))
+      )
+        return;
+      const threadId = event.payload.threadId;
+      const thread = yield* resolveThreadShell(threadId);
+      if (!thread) return;
+      const key = `${threadId}:${activity.id}`;
+      const failDelivery = (detail: string) =>
+        appendCrossProviderDeliveryFailure(threadId, activity.id, detail);
+      if (thread.session?.status === "stopped" || stoppingThreadIds.has(threadId)) {
+        return yield* failDelivery("The parent session was stopped before child-result delivery.");
+      }
+      if (compactingThreadIds.has(threadId)) {
+        return yield* failDelivery(
+          "Wait for context compaction to finish before delivering child results.",
+        );
+      }
+      const child = yield* resolveThreadShell(delivery.value.childThreadId);
+      if (child?.spawn?.parentThreadId !== threadId) {
+        return yield* failDelivery("The result does not belong to a child of this thread.");
+      }
+      const rejectInput = Effect.fn("rejectCrossProviderResultInput")(function* (
+        cause: Cause.Cause<unknown>,
+      ) {
+        if (Cause.hasInterruptsOnly(cause)) return yield* Effect.interrupt;
+        const detail = formatFailureDetail(cause);
+        const current = yield* resolveThreadShell(threadId);
+        const outstanding =
+          yield* projectionSnapshotQuery.getCrossProviderResultDeliveries(threadId);
+        // A failed extra input must not finish an unrelated active or queued turn.
+        // Restore only the idle startup this request could have left behind.
+        if (
+          current?.session?.status === "starting" &&
+          current.latestTurn?.state !== "running" &&
+          current.latestUserMessageAt === thread.latestUserMessageAt &&
+          !outstanding.some(
+            (pending) => pending.requestId !== activity.id && isResultDeliveryPending(pending),
+          )
+        ) {
+          yield* setThreadSessionErrorOnTurnStartFailure({
+            threadId,
+            detail,
+            createdAt: DateTime.formatIso(yield* DateTime.now),
+          });
+        }
+        yield* failDelivery(detail);
+      });
+      // Automatic input retains the bound model configuration; passing an explicit
+      // selection can restart Claude when its initial turn used thread defaults.
+      // Prepare in the event worker, like ordinary turn starts. Only native input
+      // acceptance is forked, so queued answers/stops can still be processed.
+      const request = yield* Effect.gen(function* () {
+        yield* ensureThreadWorktree(thread);
+        return yield* buildSendTurnRequestForThread({
+          threadId,
+          messageText: delivery.value.input,
+          interactionMode: thread.interactionMode,
+          createdAt: activity.createdAt,
+        });
+      }).pipe(
+        Effect.map(Option.some),
+        Effect.catchCause((cause) => rejectInput(cause).pipe(Effect.as(Option.none()))),
+      );
+      if (Option.isNone(request)) return;
+      yield* Effect.gen(function* () {
+        const turn = yield* providerService.sendTurn(request.value).pipe(
+          Effect.map(Option.some),
+          Effect.catchCause((cause) => rejectInput(cause).pipe(Effect.as(Option.none()))),
+        );
+        if (Option.isNone(turn)) return;
+        const createdAt = DateTime.formatIso(yield* DateTime.now);
+        yield* orchestrationEngine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`server:provider-input-accepted:${key}`),
+            threadId,
+            activity: {
+              id: EventId.make(`provider-input-accepted:${key}`),
+              kind: CROSS_PROVIDER_INPUT_ACCEPTED,
+              tone: "info",
+              summary: "Provider accepted cross-provider result input",
+              payload: { messageId: activity.id, timelineBypass: true },
+              turnId: turn.value.turnId,
+              createdAt,
+            },
+            createdAt,
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : appendProviderFailureActivity({
+                    threadId,
+                    kind: "provider.turn.start.failed",
+                    summary: "Child-result input confirmation could not be recorded",
+                    detail: `The provider accepted this input, but its turn acknowledgement could not be saved. Delivery remains pending; it will not be automatically submitted again. ${formatFailureDetail(cause)}`,
+                    requestId: activity.id,
+                    turnId: turn.value.turnId,
+                    createdAt,
+                  }),
+            ),
+          );
+      }).pipe(Effect.forkScoped);
+    },
+  );
+
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-interrupt-requested" }>,
   ) {
@@ -1708,21 +1850,33 @@ const make = Effect.gen(function* () {
           );
         },
         onSuccess: () =>
-          setThreadSession({
-            threadId: thread.id,
-            session: {
+          Effect.gen(function* () {
+            const deliveries = yield* projectionSnapshotQuery.getCrossProviderResultDeliveries(
+              thread.id,
+            );
+            yield* Effect.forEach(deliveries.filter(isResultDeliveryPending), (delivery) =>
+              appendCrossProviderDeliveryFailure(
+                thread.id,
+                delivery.requestId,
+                "The parent session stopped before child-result input finished.",
+              ),
+            );
+            yield* setThreadSession({
               threadId: thread.id,
-              status: "stopped",
-              providerName: thread.session?.providerName ?? null,
-              ...(thread.session?.providerInstanceId !== undefined
-                ? { providerInstanceId: thread.session.providerInstanceId }
-                : {}),
-              runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
-              activeTurnId: null,
-              lastError: thread.session?.lastError ?? null,
-              updatedAt: now,
-            },
-            createdAt: now,
+              session: {
+                threadId: thread.id,
+                status: "stopped",
+                providerName: thread.session?.providerName ?? null,
+                ...(thread.session?.providerInstanceId !== undefined
+                  ? { providerInstanceId: thread.session.providerInstanceId }
+                  : {}),
+                runtimeMode: thread.session?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+                activeTurnId: null,
+                lastError: thread.session?.lastError ?? null,
+                updatedAt: now,
+              },
+              createdAt: now,
+            });
           }),
       }),
       Effect.ensuring(clearStopping),
@@ -1757,6 +1911,9 @@ const make = Effect.gen(function* () {
         );
         return;
       }
+      case "thread.activity-appended":
+        yield* processCrossProviderResultRequested(event);
+        return;
       case "thread.turn-start-requested":
         yield* processTurnStartRequested(event);
         return;
@@ -1825,6 +1982,8 @@ const make = Effect.gen(function* () {
         (event.type === "thread.meta-updated" && event.payload.regenerateTitle === true) ||
         event.type === "thread.runtime-mode-set" ||
         event.type === "thread.turn-start-requested" ||
+        (event.type === "thread.activity-appended" &&
+          event.payload.activity.kind === CROSS_PROVIDER_RESULT_REQUESTED) ||
         event.type === "thread.turn-interrupt-requested" ||
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||

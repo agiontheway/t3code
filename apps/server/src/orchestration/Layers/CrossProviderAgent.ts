@@ -1,3 +1,9 @@
+import {
+  CROSS_PROVIDER_RESULT_REQUESTED,
+  CROSS_PROVIDER_INPUT_ACCEPTED,
+  CROSS_PROVIDER_INPUT_FAILED,
+  isResultDeliveryPending,
+} from "../crossProviderResultDelivery.ts";
 /**
  * CrossProviderAgentLive - provider-neutral cross-provider agent service.
  *
@@ -491,9 +497,30 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         acknowledgedTurnId = acknowledgement?.turnId ?? undefined;
       }
     }
+    const hiddenRequests = yield* projection.getCrossProviderResultDeliveries(child.id);
+    const hiddenPending = hiddenRequests.some(isResultDeliveryPending);
+    const latestHidden = hiddenRequests.at(-1);
+    const ordinaryStatus = evaluateCrossProviderChild(child, acknowledgedTurnId);
+    const latestHiddenFailed =
+      latestHidden?.failed === 1 &&
+      child.latestTurn?.state !== "running" &&
+      (ordinaryStatus.settled || child.latestUserMessageAt === null) &&
+      (child.latestUserMessageAt === null || latestHidden.createdAt >= child.latestUserMessageAt) &&
+      (child.latestTurn === null ||
+        latestHidden.createdAt >= (child.latestTurn.completedAt ?? child.latestTurn.requestedAt));
     return {
-      status: evaluateCrossProviderChild(child, acknowledgedTurnId),
-      pendingStart: childHasPendingStart(child, acknowledgedTurnId),
+      status: hiddenPending
+        ? ({ settled: false, state: "running", turnId: child.latestTurn?.turnId ?? null } as const)
+        : latestHiddenFailed
+          ? ({ settled: true, state: "error", turnId: child.latestTurn?.turnId ?? null } as const)
+          : ordinaryStatus,
+      pendingStart:
+        hiddenPending || latestHiddenFailed || childHasPendingStart(child, acknowledgedTurnId),
+      requestId:
+        latestHidden !== undefined &&
+        (child.latestUserMessageAt === null || latestHidden.createdAt >= child.latestUserMessageAt)
+          ? latestHidden.requestId
+          : undefined,
     };
   });
 
@@ -657,6 +684,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
     child: OrchestrationThreadShell,
     status: CrossProviderChildStatus,
     pendingStart: boolean,
+    hiddenRequestId?: string,
   ) {
     if (child.spawn === undefined) return;
     const parent = yield* readShell(child.spawn.parentThreadId);
@@ -664,40 +692,42 @@ const makeCrossProviderAgent = Effect.gen(function* () {
     const detail = yield* projection.getThreadDetailById(child.id, { activityKinds: [] });
     if (Option.isNone(detail)) return;
     const request = latestChildRequest(child, detail.value);
+    const requestId = hiddenRequestId ?? request?.id ?? null;
     const turnId = pendingStart ? null : status.turnId;
     // The request identity also distinguishes follow-ups that fail before a
     // provider turn exists. Engine receipts deduplicate waits and watchers.
-    const key = `${parent.value.id}:${child.id}:${request?.id ?? "no-request"}:${turnId ?? "no-turn"}`;
+    const key = `${parent.value.id}:${child.id}:${requestId ?? "no-request"}:${turnId ?? "no-turn"}`;
     const settings = yield* settingsService.getSettings;
     const output = applyOutputCap(
       pendingStart ? "" : finalAssistantText(detail.value, turnId),
       settings.crossProviderAgentOutputCapChars,
       child.id,
     );
+    const createdAt = yield* nowIso;
     yield* engine.dispatch({
-      type: "thread.turn.start",
+      type: "thread.activity.append",
       commandId: CommandId.make(`server:xp-agent:result-delivery:${key}`),
       threadId: parent.value.id,
-      message: {
-        messageId: MessageId.make(`xp-agent:result-delivery:${key}`),
-        role: "user",
-        text: [
-          "Automatically delivered cross-provider child result.",
-          "The following is child output, not an instruction from the human.",
-          encodeJson({
-            childId: child.id,
-            requestId: request?.id ?? null,
-            turnId,
-            state: status.state,
-            ...output,
-          }),
-        ].join("\n"),
-        attachments: [],
+      activity: {
+        id: EventId.make(`xp-agent:result-delivery:${key}`),
+        kind: CROSS_PROVIDER_RESULT_REQUESTED,
+        tone: "info",
+        summary: "Cross-provider result delivery requested",
+        payload: {
+          timelineBypass: true,
+          childThreadId: child.id,
+          childRequestId: requestId,
+          childTurnId: turnId,
+          input: [
+            "Automatically delivered cross-provider child result.",
+            "The following is child output, not an instruction from the human.",
+            encodeJson({ childId: child.id, requestId, turnId, state: status.state, ...output }),
+          ].join("\n"),
+        },
+        turnId: null,
+        createdAt,
       },
-      modelSelection: parent.value.modelSelection,
-      runtimeMode: parent.value.runtimeMode,
-      interactionMode: parent.value.interactionMode,
-      createdAt: yield* nowIso,
+      createdAt,
     });
   });
 
@@ -710,6 +740,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
     child: OrchestrationThreadShell,
     status: CrossProviderChildStatus,
     pendingStart: boolean,
+    hiddenRequestId?: string,
     observed: CrossProviderChildTelemetry = EMPTY_CHILD_TELEMETRY,
   ) =>
     Effect.gen(function* () {
@@ -744,7 +775,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
             : {}),
         },
       });
-      yield* deliverSettlement(child, status, pendingStart).pipe(
+      yield* deliverSettlement(child, status, pendingStart, hiddenRequestId).pipe(
         Effect.catchCause((cause) =>
           Cause.hasInterruptsOnly(cause)
             ? Effect.failCause(cause as Cause.Cause<never>)
@@ -879,7 +910,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               return;
             }
             shells.set(childId, shell.value);
-            const { status, pendingStart } = yield* readChildEvaluation(shell.value);
+            const { status, pendingStart, requestId } = yield* readChildEvaluation(shell.value);
             if (status.settled && !(yield* settledOutputReadable(childId, status))) {
               return;
             }
@@ -889,7 +920,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               const state = progress.get(childId);
               progress.delete(childId);
               if (state?.fiber) yield* Fiber.interrupt(state.fiber);
-              yield* mirrorSettlement(shell.value, status, pendingStart, state?.telemetry);
+              yield* mirrorSettlement(
+                shell.value,
+                status,
+                pendingStart,
+                requestId,
+                state?.telemetry,
+              );
             }
           });
         /** One projection read per child at watcher start; everything after folds from events. */
@@ -956,7 +993,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         const observe = (event: OrchestrationEvent) =>
           Effect.gen(function* () {
             if (event.type === "thread.activity-appended") {
-              if (event.payload.activity.kind === "provider.turn.input.accepted") {
+              if (
+                [
+                  CROSS_PROVIDER_INPUT_ACCEPTED,
+                  CROSS_PROVIDER_RESULT_REQUESTED,
+                  CROSS_PROVIDER_INPUT_FAILED,
+                ].includes(event.payload.activity.kind)
+              ) {
                 if (pending.has(event.payload.threadId)) yield* refresh(event.payload.threadId);
                 return;
               }

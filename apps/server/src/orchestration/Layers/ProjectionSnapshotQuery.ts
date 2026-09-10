@@ -1,4 +1,8 @@
 import {
+  CrossProviderResultDeliveryState,
+  CROSS_PROVIDER_RESULT_REQUESTED,
+} from "../crossProviderResultDelivery.ts";
+import {
   AgentSessionImportSource,
   ApprovalRequestId,
   ChatAttachment,
@@ -2984,6 +2988,45 @@ pending_approval_requests AS (
       }));
     });
 
+  const readCrossProviderResultDeliveries = SqlSchema.findAll({
+    Request: Schema.Struct({ threadId: ThreadId }),
+    Result: CrossProviderResultDeliveryState,
+    execute: ({ threadId }) => sql`
+      SELECT request.activity_id AS "requestId", request.created_at AS "createdAt",
+        accepted.turn_id AS "acceptedTurnId", turns.state AS "turnState",
+        CASE WHEN failed.activity_id IS NULL THEN 0 ELSE 1 END AS failed
+      FROM projection_thread_activities request
+      LEFT JOIN projection_thread_activities accepted
+        ON accepted.activity_id = 'provider-input-accepted:' || ${threadId} || ':' || request.activity_id
+        AND accepted.thread_id = request.thread_id
+      LEFT JOIN projection_thread_activities failed
+        ON failed.activity_id = 'provider-input-failed:' || ${threadId} || ':' || request.activity_id
+        AND failed.thread_id = request.thread_id
+      LEFT JOIN projection_turns turns
+        ON turns.thread_id = request.thread_id AND turns.turn_id = accepted.turn_id
+      WHERE request.thread_id = ${threadId} AND request.kind = ${CROSS_PROVIDER_RESULT_REQUESTED}
+        AND (
+          (failed.activity_id IS NULL AND (accepted.turn_id IS NULL OR turns.state IS NULL OR turns.state = 'running'))
+          OR request.activity_id = (
+            SELECT activity_id FROM projection_thread_activities
+            WHERE thread_id = ${threadId} AND kind = ${CROSS_PROVIDER_RESULT_REQUESTED}
+            ORDER BY sequence DESC LIMIT 1
+          )
+        )
+      ORDER BY request.sequence
+    `,
+  });
+  const getCrossProviderResultDeliveries: ProjectionSnapshotQueryShape["getCrossProviderResultDeliveries"] =
+    (threadId) =>
+      readCrossProviderResultDeliveries({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getCrossProviderResultDeliveries:query",
+            "ProjectionSnapshotQuery.getCrossProviderResultDeliveries:decodeRows",
+          ),
+        ),
+      );
+
   const getTurnStartMessage: ProjectionSnapshotQueryShape["getTurnStartMessage"] = Effect.fn(
     "ProjectionSnapshotQuery.getTurnStartMessage",
   )(function* (input) {
@@ -3454,6 +3497,7 @@ pending_approval_requests AS (
     getThreadShellById,
     getThreadRuntimeContext,
     getTurnStartMessage,
+    getCrossProviderResultDeliveries,
     getThreadDetailById,
     getThreadDetailSnapshot,
   } satisfies ProjectionSnapshotQueryShape;

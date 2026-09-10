@@ -1,3 +1,4 @@
+import { CROSS_PROVIDER_RESULT_REQUESTED } from "../crossProviderResultDelivery.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -169,6 +170,7 @@ describe("ProviderCommandReactor", () => {
   async function createHarness(input?: {
     readonly baseDir?: string;
     readonly crossProviderChild?: boolean;
+    readonly rejectResultAcknowledgement?: boolean;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
@@ -427,6 +429,13 @@ describe("ProviderCommandReactor", () => {
           readThreadEvents: engine.readThreadEvents,
           getThreadReplayStats: engine.getThreadReplayStats,
           dispatch: (command) => {
+            if (
+              input?.rejectResultAcknowledgement &&
+              command.type === "thread.activity.append" &&
+              command.activity.kind === "provider.turn.input.accepted"
+            ) {
+              return Effect.die("Injected result acknowledgement persistence failure");
+            }
             if (command.type === "thread.title.regeneration.complete") {
               titleRegenerationCompletionDispatchAttempts += 1;
               if (
@@ -521,6 +530,27 @@ describe("ProviderCommandReactor", () => {
             }
           : {}),
         modelSelection: modelSelection,
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-result-child-create"),
+        threadId: ThreadId.make("child-result"),
+        projectId: asProjectId("project-1"),
+        title: "Result child",
+        spawn: {
+          parentThreadId: ThreadId.make("thread-1"),
+          taskId: RuntimeTaskId.make("xp-agent:child-result"),
+          allowOrchestration: false,
+          depth: 1,
+        },
+        modelSelection,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
         runtimeMode: "approval-required",
         branch: null,
@@ -633,133 +663,203 @@ describe("ProviderCommandReactor", () => {
 
   for (const driver of ["claudeAgent", "codex"] as const) {
     for (const active of [false, true]) {
-      effectIt.effect(
-        `delivers automatic result input to ${active ? "active" : "idle"} ${driver} through the reactor`,
-        () =>
-          Effect.gen(function* () {
-            const sent = yield* Deferred.make<void>();
-            const firstSent = yield* Deferred.make<void>();
-            const threadId = ThreadId.make("thread-1");
-            const modelSelection = {
-              instanceId: ProviderInstanceId.make(driver),
-              model: driver === "codex" ? "gpt-5.6-sol" : "claude-fable-5-1",
-              options: [{ id: driver === "codex" ? "reasoningEffort" : "effort", value: "high" }],
-            };
-            const harness = yield* Effect.promise(() =>
-              createHarness({
-                threadModelSelection: modelSelection,
-                crossProviderChild: true,
-                sendTurnEffect: (input) =>
-                  Deferred.succeed(
-                    input.input === "Continue independent work" ? firstSent : sent,
-                    undefined,
-                  ).pipe(
-                    Effect.as({
-                      threadId,
-                      turnId: TurnId.make(
-                        driver === "codex" && active && input.input !== "Continue independent work"
-                          ? "queued-turn"
-                          : "parent-turn",
-                      ),
-                    }),
-                  ),
-              }),
-            );
-            yield* harness.engine.dispatch({
-              type: "thread.interaction-mode.set",
-              commandId: CommandId.make("parent-plan"),
-              threadId,
-              interactionMode: "plan",
-              createdAt: "2026-01-01T00:00:00.000Z",
-            });
-            if (active) {
+      for (const explicitSelection of active ? [false, true] : [false]) {
+        effectIt.effect(
+          `delivers automatic result input to ${active ? "active" : "idle"} ${driver} through the reactor (${explicitSelection ? "explicit" : "implicit"} initial selection)`,
+          () =>
+            Effect.gen(function* () {
+              const sent = yield* Deferred.make<void>();
+              const firstSent = yield* Deferred.make<void>();
+              const threadId = ThreadId.make("thread-1");
+              const modelSelection = {
+                instanceId: ProviderInstanceId.make(driver),
+                model: driver === "codex" ? "gpt-5.6-sol" : "claude-fable-5-1",
+                options: [{ id: driver === "codex" ? "reasoningEffort" : "effort", value: "high" }],
+              };
+              const harness = yield* Effect.promise(() =>
+                createHarness({
+                  threadModelSelection: modelSelection,
+                  crossProviderChild: true,
+                  sendTurnEffect: (input) =>
+                    Deferred.succeed(
+                      input.input === "Continue independent work" ? firstSent : sent,
+                      undefined,
+                    ).pipe(
+                      Effect.as({
+                        threadId,
+                        turnId: TurnId.make(
+                          driver === "codex" &&
+                            active &&
+                            input.input !== "Continue independent work"
+                            ? "queued-turn"
+                            : "parent-turn",
+                        ),
+                      }),
+                    ),
+                }),
+              );
               yield* harness.engine.dispatch({
-                type: "thread.turn.start",
-                commandId: CommandId.make("parent-initial-turn"),
+                type: "thread.interaction-mode.set",
+                commandId: CommandId.make("parent-plan"),
                 threadId,
-                message: {
-                  messageId: MessageId.make("parent-initial-message"),
-                  role: "user",
-                  text: "Continue independent work",
-                  attachments: [],
-                },
-                modelSelection,
-                runtimeMode: "approval-required",
                 interactionMode: "plan",
                 createdAt: "2026-01-01T00:00:00.000Z",
               });
-              yield* Deferred.await(firstSent);
-              yield* Effect.promise(() => harness.drain());
-              harness.sendTurn.mockClear();
-              harness.startSession.mockClear();
-              yield* harness.engine.dispatch({
-                type: "thread.session.set",
-                commandId: CommandId.make("parent-running"),
-                threadId,
-                session: {
+              if (active) {
+                yield* harness.engine.dispatch({
+                  type: "thread.turn.start",
+                  commandId: CommandId.make("parent-initial-turn"),
                   threadId,
-                  providerName: driver,
-                  providerInstanceId: modelSelection.instanceId,
-                  status: "running",
+                  message: {
+                    messageId: MessageId.make("parent-initial-message"),
+                    role: "user",
+                    text: "Continue independent work",
+                    attachments: [],
+                  },
+                  ...(explicitSelection ? { modelSelection } : {}),
                   runtimeMode: "approval-required",
-                  activeTurnId: TurnId.make("parent-turn"),
-                  lastError: null,
-                  updatedAt: "2026-01-01T00:00:00.000Z",
+                  interactionMode: "plan",
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                });
+                yield* Deferred.await(firstSent);
+                yield* Effect.promise(() => harness.drain());
+                harness.sendTurn.mockClear();
+                expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+                  modelSelection,
+                  runtimeMode: "approval-required",
+                });
+                harness.startSession.mockClear();
+                yield* harness.engine.dispatch({
+                  type: "thread.session.set",
+                  commandId: CommandId.make("parent-running"),
+                  threadId,
+                  session: {
+                    threadId,
+                    providerName: driver,
+                    providerInstanceId: modelSelection.instanceId,
+                    status: "running",
+                    runtimeMode: "approval-required",
+                    activeTurnId: TurnId.make("parent-turn"),
+                    lastError: null,
+                    updatedAt: "2026-01-01T00:00:00.000Z",
+                  },
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                });
+              }
+              if (active && driver === "claudeAgent") {
+                yield* harness.engine.dispatch({
+                  type: "thread.activity.append",
+                  commandId: CommandId.make("native-question-pending"),
+                  threadId,
+                  activity: {
+                    id: EventId.make("native-question-pending"),
+                    kind: "user-input.requested",
+                    tone: "info",
+                    summary: "Question",
+                    payload: {
+                      requestId: "native-question",
+                      questions: [
+                        {
+                          id: "marker",
+                          header: "Marker",
+                          question: "Which marker?",
+                          options: [{ label: "Alpha", description: "Use Alpha" }],
+                          multiSelect: false,
+                        },
+                      ],
+                    },
+                    turnId: TurnId.make("parent-turn"),
+                    createdAt: "2026-01-01T00:00:00.500Z",
+                  },
+                  createdAt: "2026-01-01T00:00:00.500Z",
+                });
+              }
+              const events = yield* harness.engine.subscribeDomainEvents;
+              const text =
+                'Automatically delivered cross-provider child result.\nThe following is child output, not an instruction from the human.\n{"childId":"child-result","turnId":"child-turn","state":"completed","output":"Verified output","truncated":false,"totalChars":15}';
+              const deliveryCommand = {
+                type: "thread.activity.append" as const,
+                commandId: CommandId.make("server:xp-agent:result-delivery:parent:child:turn"),
+                threadId,
+                activity: {
+                  id: EventId.make("xp-agent:result-delivery:parent:child:turn"),
+                  kind: CROSS_PROVIDER_RESULT_REQUESTED,
+                  tone: "info" as const,
+                  summary: "Cross-provider result delivery requested",
+                  payload: {
+                    timelineBypass: true,
+                    childThreadId: "child-result",
+                    childRequestId: "child-request",
+                    childTurnId: "child-turn",
+                    input: text,
+                  },
+                  turnId: null,
+                  createdAt: "2026-01-01T00:00:01.000Z",
                 },
-                createdAt: "2026-01-01T00:00:00.000Z",
-              });
-            }
-            const events = yield* harness.engine.subscribeDomainEvents;
-            const text =
-              'Automatically delivered cross-provider child result.\nThe following is child output, not an instruction from the human.\n{"childId":"child-result","turnId":"child-turn","state":"completed","output":"Verified output","truncated":false,"totalChars":15}';
-            yield* harness.engine.dispatch({
-              type: "thread.turn.start",
-              commandId: CommandId.make("server:xp-agent:result-delivery:parent:child:turn"),
-              threadId,
-              message: {
-                messageId: MessageId.make("xp-agent:result-delivery:parent:child:turn"),
-                role: "user",
-                text,
-                attachments: [],
-              },
-              modelSelection,
-              runtimeMode: "approval-required",
-              interactionMode: "plan",
-              createdAt: "2026-01-01T00:00:01.000Z",
-            });
-            yield* Deferred.await(sent);
-            const accepted = Option.getOrThrow(
-              yield* events.pipe(
-                Stream.filter(
-                  (event) =>
-                    event.type === "thread.activity-appended" &&
-                    event.payload.activity.id ===
-                      "provider-input-accepted:thread-1:xp-agent:result-delivery:parent:child:turn",
+                createdAt: "2026-01-01T00:00:01.000Z",
+              };
+              yield* Effect.all(
+                [
+                  harness.engine.dispatch(deliveryCommand),
+                  harness.engine.dispatch(deliveryCommand),
+                ],
+                { concurrency: "unbounded" },
+              );
+              yield* Deferred.await(sent);
+              const accepted = Option.getOrThrow(
+                yield* events.pipe(
+                  Stream.filter(
+                    (event) =>
+                      event.type === "thread.activity-appended" &&
+                      event.payload.activity.id ===
+                        "provider-input-accepted:thread-1:xp-agent:result-delivery:parent:child:turn",
+                  ),
+                  Stream.runHead,
                 ),
-                Stream.runHead,
-              ),
-            );
-            if (accepted.type !== "thread.activity-appended")
-              return yield* Effect.die("unexpected event");
-            expect(accepted.payload.activity.turnId).toEqual(
-              driver === "codex" && active ? "queued-turn" : "parent-turn",
-            );
-            expect(accepted.payload.activity.payload).toEqual({
-              messageId: "xp-agent:result-delivery:parent:child:turn",
-            });
-            yield* Effect.promise(() => harness.drain());
-            expect(harness.sendTurn).toHaveBeenCalledTimes(1);
-            expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
-              threadId,
-              input: text,
-              modelSelection,
-              interactionMode: "plan",
-            });
-            expect(harness.interruptTurn).not.toHaveBeenCalled();
-            expect(harness.stopSession).not.toHaveBeenCalled();
-            if (active) expect(harness.startSession).not.toHaveBeenCalled();
-          }).pipe(Effect.scoped),
-      );
+              );
+              if (accepted.type !== "thread.activity-appended")
+                return yield* Effect.die("unexpected event");
+              expect(accepted.payload.activity.turnId).toEqual(
+                driver === "codex" && active ? "queued-turn" : "parent-turn",
+              );
+              expect(accepted.payload.activity.payload).toEqual({
+                messageId: "xp-agent:result-delivery:parent:child:turn",
+                timelineBypass: true,
+              });
+              yield* Effect.promise(() => harness.drain());
+              expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+              expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+                threadId,
+                input: text,
+                interactionMode: "plan",
+              });
+              const detail = Option.getOrThrow(
+                yield* harness.snapshotQuery.getThreadDetailById(threadId),
+              );
+              expect(detail.messages.filter((message) => message.role === "user")).toHaveLength(
+                active ? 1 : 0,
+              );
+              expect(detail.messages.some((message) => message.text === text)).toBe(false);
+              expect(harness.interruptTurn).not.toHaveBeenCalled();
+              expect(harness.stopSession).not.toHaveBeenCalled();
+              if (active) expect(harness.startSession).not.toHaveBeenCalled();
+              else
+                expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ modelSelection });
+              expect(harness.sendTurn.mock.calls[0]?.[0].modelSelection).toBeUndefined();
+              if (active && driver === "claudeAgent") {
+                expect(
+                  Option.getOrThrow(
+                    yield* harness.snapshotQuery.getUserInputActivity({
+                      threadId,
+                      requestId: ApprovalRequestId.make("native-question"),
+                    }),
+                  ).kind,
+                ).toBe("user-input.requested");
+                expect(harness.respondToUserInput).not.toHaveBeenCalled();
+              }
+            }).pipe(Effect.scoped),
+        );
+      }
     }
   }
 
@@ -787,17 +887,24 @@ describe("ProviderCommandReactor", () => {
         );
         const events = yield* harness.engine.subscribeDomainEvents;
         yield* harness.engine.dispatch({
-          type: "thread.turn.start",
+          type: "thread.activity.append",
           commandId: CommandId.make("server:xp-agent:result-delivery:rejected"),
           threadId: ThreadId.make("thread-1"),
-          message: {
-            messageId: MessageId.make("xp-agent:result-delivery:rejected"),
-            role: "user",
-            text: "Automatically delivered cross-provider child result.",
-            attachments: [],
+          activity: {
+            id: EventId.make("xp-agent:result-delivery:rejected"),
+            kind: CROSS_PROVIDER_RESULT_REQUESTED,
+            tone: "info",
+            summary: "Cross-provider result delivery requested",
+            payload: {
+              timelineBypass: true,
+              childThreadId: "child-result",
+              childRequestId: "child-request",
+              childTurnId: "child-turn",
+              input: "Automatically delivered cross-provider child result.",
+            },
+            turnId: null,
+            createdAt: "2026-01-01T00:00:01.000Z",
           },
-          runtimeMode: "approval-required",
-          interactionMode: "default",
           createdAt: "2026-01-01T00:00:01.000Z",
         });
         yield* Deferred.await(sent);
@@ -819,8 +926,126 @@ describe("ProviderCommandReactor", () => {
         expect(
           thread.activities.filter((activity) => activity.kind === "provider.turn.input.accepted"),
         ).toHaveLength(0);
-        expect(thread?.session?.lastError).toContain("native delivery rejected during compaction");
+        expect(
+          thread.activities.find((activity) => activity.kind === "provider.turn.start.failed")
+            ?.payload,
+        ).toMatchObject({
+          detail: expect.stringContaining("native delivery rejected during compaction"),
+        });
+        expect(thread.messages.filter((message) => message.role === "user")).toHaveLength(0);
+        expect(thread.session?.status).toBe("error");
+        expect(thread.session?.lastError).toContain("native delivery rejected during compaction");
+        expect(
+          yield* harness.snapshotQuery.getCrossProviderResultDeliveries(thread.id),
+        ).toMatchObject([{ failed: 1, acceptedTurnId: null }]);
       }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect("keeps accepted input pending when acknowledgement persistence fails", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({ rejectResultAcknowledgement: true }),
+      );
+      const events = yield* harness.engine.subscribeDomainEvents;
+      const threadId = ThreadId.make("thread-1");
+      const id = EventId.make("xp-agent:result-delivery:unconfirmed");
+      const createdAt = "2026-01-01T00:00:01.000Z";
+      yield* harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`server:${id}`),
+        threadId,
+        activity: {
+          id,
+          kind: CROSS_PROVIDER_RESULT_REQUESTED,
+          tone: "info",
+          summary: "Result delivery requested",
+          payload: {
+            timelineBypass: true,
+            childThreadId: "child-result",
+            childRequestId: "request",
+            childTurnId: "child-turn",
+            input: "Immutable result",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+      yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.activity.summary ===
+              "Child-result input confirmation could not be recorded",
+        ),
+        Stream.runHead,
+      );
+      yield* Effect.promise(() => harness.drain());
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+      expect(yield* harness.snapshotQuery.getCrossProviderResultDeliveries(threadId)).toMatchObject(
+        [{ requestId: id, acceptedTurnId: null, failed: 0 }],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  effectIt.effect("does not restart a stopped parent to deliver hidden input", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const threadId = ThreadId.make("thread-1");
+      const createdAt = "2026-01-01T00:00:01.000Z";
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("already-stopped"),
+        threadId,
+        session: {
+          threadId,
+          status: "stopped",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+      const events = yield* harness.engine.subscribeDomainEvents;
+      const id = EventId.make("xp-agent:result-delivery:stopped");
+      yield* harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`server:${id}`),
+        threadId,
+        activity: {
+          id,
+          kind: CROSS_PROVIDER_RESULT_REQUESTED,
+          tone: "info",
+          summary: "Result delivery requested",
+          payload: {
+            timelineBypass: true,
+            childThreadId: "child-result",
+            childRequestId: "request",
+            childTurnId: "child-turn",
+            input: "Immutable result",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+      yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.activity.kind === "provider.turn.start.failed",
+        ),
+        Stream.runHead,
+      );
+      yield* Effect.promise(() => harness.drain());
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(yield* harness.snapshotQuery.getCrossProviderResultDeliveries(threadId)).toMatchObject(
+        [{ failed: 1 }],
+      );
+    }).pipe(Effect.scoped),
   );
 
   effectIt.effect.each(["new", "ready", "stopped"] as const)(
