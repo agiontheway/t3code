@@ -38,6 +38,7 @@ const makeProjectionSnapshotQueryLayer = (importedWorkspaceRoots: ReadonlyArray<
   Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
     getCommandReadModel: () => Effect.die("unused"),
     getUserInputActivity: () => Effect.die("unused"),
+    getCrossProviderResultDeliveries: () => Effect.die("unused"),
     getSnapshot: () => Effect.die("unused"),
     getShellSnapshot: () =>
       Effect.succeed({
@@ -1523,7 +1524,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("shares a 64 MiB full-read budget across providers without hiding projects", () =>
+    it.effect("streams large transcripts across providers without hiding projects", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1620,9 +1621,9 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           "Importable",
           "Importable",
           "Importable",
-          "Skipped",
+          "Importable",
         ]);
-        expect(fullReadBytes).toBe(64 * 1024 * 1024);
+        expect(fullReadBytes).toBe(80 * 1024 * 1024);
       }),
     );
 
@@ -1836,7 +1837,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
-    it.effect("reports an eligible transcript over 16 MiB as skipped", () =>
+    it.effect("imports visible history from a transcript with an oversized tool record", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
@@ -1844,7 +1845,7 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
         const codexHomePath = yield* makeTempDir("t3code-codex-home-");
         const workspace = yield* makeTempDir("t3code-workspace-");
-        const transcript = [
+        const transcript = `${[
           encodeTranscriptRecord({
             type: "session_meta",
             payload: { id: "large-session", cwd: workspace },
@@ -1853,9 +1854,10 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             type: "event_msg",
             payload: { type: "user_message", message: "Import this large session" },
           }),
-        ]
-          .join("\n")
-          .padEnd(16 * 1024 * 1024 + 1, " ");
+        ].join("\n")}\n${encodeTranscriptRecord({ type: "tool_result", data: "" }).padEnd(
+          16 * 1024 * 1024 + 1,
+          " ",
+        )}`;
         yield* writeTranscript({
           filePath: path.join(codexHomePath, "sessions", "2026", "08", "24", "rollout-large.jsonl"),
           contents: transcript,
@@ -1868,7 +1870,15 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           workspaceRoot: workspace,
         });
 
-        expect(outcomes).toEqual([{ _tag: "Skipped" }]);
+        expect(outcomes).toMatchObject([
+          {
+            _tag: "Importable",
+            thread: {
+              providerSessionId: "large-session",
+              messages: [{ role: "user", text: "Import this large session" }],
+            },
+          },
+        ]);
       }),
     );
 

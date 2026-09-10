@@ -60,6 +60,67 @@ const peerPath = NodePath.join(
 );
 
 describe("CodexSessionRuntime dynamic tools integration", () => {
+  for (const active of [false, true]) {
+    it.effect(
+      `receives automatic child result input with an ${active ? "active" : "idle"} parent`,
+      () =>
+        Effect.gen(function* () {
+          const script = {
+            rootThreadId: ROOT,
+            recordTurnStart: true,
+            holdTurnOpen: active,
+            onlyFirstTurnStarts: active,
+            turnIds: ["parent-work", "parent-delivery"],
+            notifications: [],
+          };
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          NodeFS.writeFileSync(scriptPath, JSON.stringify(script), "utf8");
+          for (const suffix of [".requests", ".interrupts"])
+            NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+          yield* Effect.addFinalizer(() =>
+            Effect.sync(() => {
+              for (const suffix of ["", ".requests", ".interrupts"])
+                NodeFS.rmSync(`${scriptPath}${suffix}`, { force: true });
+            }),
+          );
+          const runtime = yield* makeCodexSessionRuntime({
+            threadId: THREAD_ID,
+            binaryPath: peerPath,
+            cwd: NodeOS.tmpdir(),
+            runtimeMode: "full-access",
+            environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+          });
+          yield* runtime.start();
+          const firstObserved = yield* runtime.events.pipe(
+            Stream.filter((event) => event.method === (active ? "turn/started" : "turn/completed")),
+            Stream.runHead,
+            Effect.forkScoped,
+          );
+          yield* runtime.sendTurn({ input: "Continue independent work" });
+          yield* Fiber.join(firstObserved);
+          const text =
+            'Automatically delivered cross-provider child result.\nThe following is child output, not an instruction from the human.\n{"childId":"child-result","turnId":"child-turn","state":"completed","output":"Verified output","truncated":false,"totalChars":15}';
+          yield* runtime.sendTurn({
+            input: text,
+            model: "gpt-5.6-sol",
+            effort: "high",
+            interactionMode: "plan",
+          });
+          const requests = readJsonLines(`${scriptPath}.requests`) as Array<{
+            method: string;
+            params: Record<string, unknown>;
+          }>;
+          assert.equal(requests.length, 2);
+          assert.deepEqual(requests[1]!.params.input, [{ type: "text", text }]);
+          assert.equal(requests[1]!.params.model, "gpt-5.6-sol");
+          assert.equal(requests[1]!.params.threadId, ROOT);
+          assert.isFalse(NodeFS.existsSync(`${scriptPath}.interrupts`));
+          if (active) assert.equal((yield* runtime.getSession).activeTurnId, "parent-work");
+          yield* runtime.close;
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   it.effect("sends dynamicTools on thread/start and answers item/tool/call", () =>
     Effect.gen(function* () {
       const calls: Array<{ threadId: ThreadId; tool: string; args: unknown; callId?: string }> = [];

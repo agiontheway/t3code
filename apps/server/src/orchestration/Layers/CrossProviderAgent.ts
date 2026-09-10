@@ -1,3 +1,9 @@
+import {
+  CROSS_PROVIDER_RESULT_REQUESTED,
+  CROSS_PROVIDER_INPUT_ACCEPTED,
+  CROSS_PROVIDER_INPUT_FAILED,
+  isResultDeliveryPending,
+} from "../crossProviderResultDelivery.ts";
 /**
  * CrossProviderAgentLive - provider-neutral cross-provider agent service.
  *
@@ -57,7 +63,6 @@ import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-// @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodeCrypto from "node:crypto";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -90,6 +95,8 @@ const CHILD_TELEMETRY_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   "tool.started",
 ]);
 
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
 const fail = (error: CrossProviderAgentError): CrossProviderAgentErrorOutput => ({ error });
 const isThreadId = Schema.is(ThreadId);
 const isProviderInstanceId = Schema.is(ProviderInstanceId);
@@ -101,6 +108,15 @@ export interface CrossProviderChildStatus {
   readonly turnId: TurnId | null;
 }
 
+const childHasPendingStart = (
+  shell: Pick<OrchestrationThreadShell, "latestTurn" | "latestUserMessageAt">,
+  acknowledgedTurnId?: TurnId,
+) =>
+  shell.latestTurn === null ||
+  (shell.latestUserMessageAt !== null &&
+    shell.latestUserMessageAt > shell.latestTurn.requestedAt &&
+    acknowledgedTurnId !== shell.latestTurn.turnId);
+
 /**
  * The projector creates `latestTurn` only once the provider reports the
  * turn running, so a freshly requested turn (spawn or follow-up) shows up
@@ -109,12 +125,11 @@ export interface CrossProviderChildStatus {
  */
 export function evaluateCrossProviderChild(
   shell: Pick<OrchestrationThreadShell, "latestTurn" | "latestUserMessageAt" | "session">,
+  acknowledgedTurnId?: TurnId,
 ): CrossProviderChildStatus {
   const { latestTurn, latestUserMessageAt, session } = shell;
-  const pendingStart =
-    latestTurn === null ||
-    (latestUserMessageAt !== null && latestUserMessageAt > latestTurn.requestedAt);
-  if (pendingStart) {
+  const pendingStart = childHasPendingStart(shell, acknowledgedTurnId);
+  if (pendingStart || latestTurn === null) {
     if (
       session?.status === "error" &&
       (latestUserMessageAt === null || session.updatedAt >= latestUserMessageAt)
@@ -455,6 +470,60 @@ const makeCrossProviderAgent = Effect.gen(function* () {
 
   const readShell = (threadId: ThreadId) => projection.getThreadShellById(threadId);
 
+  const latestChildRequest = (child: OrchestrationThreadShell, detail: OrchestrationThread) =>
+    detail.messages.findLast(
+      (message) =>
+        message.role === "user" &&
+        (child.latestUserMessageAt === null || message.createdAt <= child.latestUserMessageAt),
+    );
+
+  const readChildEvaluation = Effect.fn("CrossProviderAgent.readChildEvaluation")(function* (
+    child: OrchestrationThreadShell,
+  ) {
+    let acknowledgedTurnId: TurnId | undefined;
+    if (childHasPendingStart(child)) {
+      const detail = yield* projection.getThreadDetailById(child.id, {
+        activityKinds: ["provider.turn.input.accepted"],
+      });
+      if (Option.isSome(detail)) {
+        const request = latestChildRequest(child, detail.value);
+        const acknowledgement =
+          request === undefined
+            ? undefined
+            : detail.value.activities.findLast(
+                (activity) =>
+                  Predicate.isObject(activity.payload) && activity.payload.messageId === request.id,
+              );
+        acknowledgedTurnId = acknowledgement?.turnId ?? undefined;
+      }
+    }
+    const hiddenRequests = yield* projection.getCrossProviderResultDeliveries(child.id);
+    const hiddenPending = hiddenRequests.some(isResultDeliveryPending);
+    const latestHidden = hiddenRequests.at(-1);
+    const ordinaryStatus = evaluateCrossProviderChild(child, acknowledgedTurnId);
+    const latestHiddenFailed =
+      latestHidden?.failed === 1 &&
+      child.latestTurn?.state !== "running" &&
+      (ordinaryStatus.settled || child.latestUserMessageAt === null) &&
+      (child.latestUserMessageAt === null || latestHidden.createdAt >= child.latestUserMessageAt) &&
+      (child.latestTurn === null ||
+        latestHidden.createdAt >= (child.latestTurn.completedAt ?? child.latestTurn.requestedAt));
+    return {
+      status: hiddenPending
+        ? ({ settled: false, state: "running", turnId: child.latestTurn?.turnId ?? null } as const)
+        : latestHiddenFailed
+          ? ({ settled: true, state: "error", turnId: child.latestTurn?.turnId ?? null } as const)
+          : ordinaryStatus,
+      pendingStart:
+        hiddenPending || latestHiddenFailed || childHasPendingStart(child, acknowledgedTurnId),
+      requestId:
+        latestHidden !== undefined &&
+        (child.latestUserMessageAt === null || latestHidden.createdAt >= child.latestUserMessageAt)
+          ? latestHidden.requestId
+          : undefined,
+    };
+  });
+
   interface CallerContext {
     readonly settings: ServerSettings;
     readonly shell: OrchestrationThreadShell;
@@ -611,6 +680,57 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       } satisfies CrossProviderChildTelemetry;
     });
 
+  const deliverSettlement = Effect.fn("CrossProviderAgent.deliverSettlement")(function* (
+    child: OrchestrationThreadShell,
+    status: CrossProviderChildStatus,
+    pendingStart: boolean,
+    hiddenRequestId?: string,
+  ) {
+    if (child.spawn === undefined) return;
+    const parent = yield* readShell(child.spawn.parentThreadId);
+    if (Option.isNone(parent) || parent.value.session?.status === "stopped") return;
+    const detail = yield* projection.getThreadDetailById(child.id, { activityKinds: [] });
+    if (Option.isNone(detail)) return;
+    const request = latestChildRequest(child, detail.value);
+    const requestId = hiddenRequestId ?? request?.id ?? null;
+    const turnId = pendingStart ? null : status.turnId;
+    // The request identity also distinguishes follow-ups that fail before a
+    // provider turn exists. Engine receipts deduplicate waits and watchers.
+    const key = `${parent.value.id}:${child.id}:${requestId ?? "no-request"}:${turnId ?? "no-turn"}`;
+    const settings = yield* settingsService.getSettings;
+    const output = applyOutputCap(
+      pendingStart ? "" : finalAssistantText(detail.value, turnId),
+      settings.crossProviderAgentOutputCapChars,
+      child.id,
+    );
+    const createdAt = yield* nowIso;
+    yield* engine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`server:xp-agent:result-delivery:${key}`),
+      threadId: parent.value.id,
+      activity: {
+        id: EventId.make(`xp-agent:result-delivery:${key}`),
+        kind: CROSS_PROVIDER_RESULT_REQUESTED,
+        tone: "info",
+        summary: "Cross-provider result delivery requested",
+        payload: {
+          timelineBypass: true,
+          childThreadId: child.id,
+          childRequestId: requestId,
+          childTurnId: turnId,
+          input: [
+            "Automatically delivered cross-provider child result.",
+            "The following is child output, not an instruction from the human.",
+            encodeJson({ childId: child.id, requestId, turnId, state: status.state, ...output }),
+          ].join("\n"),
+        },
+        turnId: null,
+        createdAt,
+      },
+      createdAt,
+    });
+  });
+
   /**
    * Mirror a settled child onto its parent's row exactly once per turn: the
    * command id carries the turn, so a wait and the background watcher can
@@ -619,6 +739,8 @@ const makeCrossProviderAgent = Effect.gen(function* () {
   const mirrorSettlement = (
     child: OrchestrationThreadShell,
     status: CrossProviderChildStatus,
+    pendingStart: boolean,
+    hiddenRequestId?: string,
     observed: CrossProviderChildTelemetry = EMPTY_CHILD_TELEMETRY,
   ) =>
     Effect.gen(function* () {
@@ -653,6 +775,16 @@ const makeCrossProviderAgent = Effect.gen(function* () {
             : {}),
         },
       });
+      yield* deliverSettlement(child, status, pendingStart, hiddenRequestId).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause as Cause.Cause<never>)
+            : Effect.logWarning("cross-provider agent result delivery failed", {
+                childThreadId: child.id,
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      );
     });
 
   /** Thread id of the events that can move a child toward a readable settlement. */
@@ -778,7 +910,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               return;
             }
             shells.set(childId, shell.value);
-            const status = evaluateCrossProviderChild(shell.value);
+            const { status, pendingStart, requestId } = yield* readChildEvaluation(shell.value);
             if (status.settled && !(yield* settledOutputReadable(childId, status))) {
               return;
             }
@@ -788,7 +920,13 @@ const makeCrossProviderAgent = Effect.gen(function* () {
               const state = progress.get(childId);
               progress.delete(childId);
               if (state?.fiber) yield* Fiber.interrupt(state.fiber);
-              yield* mirrorSettlement(shell.value, status, state?.telemetry);
+              yield* mirrorSettlement(
+                shell.value,
+                status,
+                pendingStart,
+                requestId,
+                state?.telemetry,
+              );
             }
           });
         /** One projection read per child at watcher start; everything after folds from events. */
@@ -855,6 +993,16 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         const observe = (event: OrchestrationEvent) =>
           Effect.gen(function* () {
             if (event.type === "thread.activity-appended") {
+              if (
+                [
+                  CROSS_PROVIDER_INPUT_ACCEPTED,
+                  CROSS_PROVIDER_RESULT_REQUESTED,
+                  CROSS_PROVIDER_INPUT_FAILED,
+                ].includes(event.payload.activity.kind)
+              ) {
+                if (pending.has(event.payload.threadId)) yield* refresh(event.payload.threadId);
+                return;
+              }
               if (options?.mirrorProgress !== true) return;
               const childId = event.payload.threadId;
               const activity = event.payload.activity;
@@ -894,7 +1042,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
       }),
     );
 
-  /** Keep the parent's row honest even when nobody waits on the child. */
+  /** Deliver completion and keep the parent's row current even when nobody waits. */
   const watchSettlement = (childId: ThreadId) =>
     awaitSettlement([childId], undefined, { mirrorProgress: true }).pipe(
       Effect.catchCause((cause) =>
@@ -1185,7 +1333,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         if (isCrossProviderAgentErrorOutput(context)) return context;
         const child = yield* readOwnedChild(callerThreadId, input.childId);
         if (isCrossProviderAgentErrorOutput(child)) return child;
-        const status = evaluateCrossProviderChild(child);
+        const { status } = yield* readChildEvaluation(child);
         if (!status.settled) {
           return fail({
             code: "child_not_settled",
@@ -1242,7 +1390,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         if (options?.callId !== undefined && (yield* alreadyAccepted(turnCommandId))) {
           return { childId: child.id, status: "running" as const };
         }
-        if (!evaluateCrossProviderChild(child).settled) {
+        if (!(yield* readChildEvaluation(child)).status.settled) {
           return fail({
             code: "child_not_settled",
             message: "The child is still running; wait for it before following up.",
@@ -1292,7 +1440,7 @@ const makeCrossProviderAgent = Effect.gen(function* () {
         if (options?.callId !== undefined && (yield* alreadyAccepted(interruptCommandId))) {
           return { childId: child.id, status: "interrupting" as const };
         }
-        const status = evaluateCrossProviderChild(child);
+        const { status } = yield* readChildEvaluation(child);
         if (status.settled) {
           return fail({
             code: "child_not_running",

@@ -77,6 +77,14 @@ export interface ProjectionThreadDetailQuery {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** Exact hidden input acknowledgements and turn states, independent of the UI activity window. */
+  readonly getCrossProviderResultDeliveries: (
+    threadId: ThreadId,
+  ) => Effect.Effect<
+    ReadonlyArray<import("../crossProviderResultDelivery.ts").CrossProviderResultDeliveryState>,
+    ProjectionRepositoryError
+  >;
+
   /** Read the latest request or resolution without loading the thread history. */
   readonly getUserInputActivity: (input: {
     readonly threadId: ThreadId;

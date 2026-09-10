@@ -93,7 +93,7 @@ import {
   isClaudeInProcessToolName,
 } from "./claudeInProcessTools.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
-import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
@@ -157,10 +157,11 @@ interface ClaudeTurnState {
   /**
    * True for turns auto-started by assistant output arriving without an
    * active turn (background agent/subagent responses between user prompts).
-   * Synthetic turns are auto-closed by the next sendTurn; real turns are
-   * steered instead (the queued message continues the same turn).
+   * Synthetic turns are auto-closed by the next sendTurn unless a native
+   * question or approval makes the continuation live. Live turns are steered
+   * instead, including while the SDK resumes after a callback answer.
    */
-  readonly synthetic?: boolean;
+  synthetic?: boolean;
   readonly items: Array<unknown>;
   readonly assistantTextBlocks: Map<number, AssistantTextBlockState>;
   readonly assistantTextBlockOrder: Array<AssistantTextBlockState>;
@@ -169,6 +170,8 @@ interface ClaudeTurnState {
   compactedSinceLatestAssistantUsage: boolean;
   hasSubagents: boolean;
   nextSyntheticAssistantBlockIndex: number;
+  authenticationFailureMessage: string | undefined;
+  rejectedRateLimitTypes: Set<string>;
 }
 
 interface AssistantTextBlockState {
@@ -445,10 +448,13 @@ function resultErrorsText(result: SDKResultMessage): string {
 }
 
 /** Failure text for structured terminal reasons, including success-tagged failures. */
-function terminalResultError(reason: SDKResultMessage["terminal_reason"]): string | undefined {
+function terminalResultError(
+  reason: SDKResultMessage["terminal_reason"],
+  failureHint?: string,
+): string | undefined {
   switch (reason) {
     case "api_error":
-      return "Claude gave up after repeated API errors.";
+      return failureHint ?? "Claude gave up after repeated API errors.";
     case "malformed_tool_use_exhausted":
       return "Claude gave up after repeated malformed tool calls.";
     case "budget_exhausted":
@@ -1562,18 +1568,31 @@ function isOverloadedResult(result: SDKResultMessage): boolean {
 }
 
 /** Derives turn status and its error from the same provider result. */
-function resultOutcome(result: SDKResultMessage): {
+function resultOutcome(
+  result: SDKResultMessage,
+  failureHint?: string,
+): {
   status: ProviderRuntimeTurnStatus;
   errorMessage: string | undefined;
 } {
+  // A success result flagged is_error only fails when the turn already
+  // reported its cause (expired login, rejected usage window).
+  const successTaggedFailure = result.subtype === "success" && result.is_error === true;
   const structuredError = isOverloadedResult(result)
     ? "Claude API is overloaded (529). Try again shortly."
-    : terminalResultError(result.terminal_reason);
-  // CLI diagnostic entries must not become the error banner.
+    : (terminalResultError(result.terminal_reason, failureHint) ??
+      (successTaggedFailure ? failureHint : undefined));
+  // CLI diagnostic entries must not become the error banner. Success results
+  // carry no typed error list, but a success-tagged failure may still list one.
+  const listedErrors: ReadonlyArray<unknown> =
+    "errors" in result && Array.isArray(result.errors) ? result.errors : [];
   const listedError =
-    result.subtype === "success" || !Array.isArray(result.errors)
+    result.subtype === "success" && !successTaggedFailure
       ? undefined
-      : result.errors.find((error) => !error.startsWith("[ede_diagnostic]"));
+      : listedErrors.find(
+          (error): error is string =>
+            typeof error === "string" && !error.startsWith("[ede_diagnostic]"),
+        );
   const errorMessage = listedError || structuredError;
   if (structuredError !== undefined) return { status: "failed", errorMessage };
   if (result.subtype === "success") return { status: "completed", errorMessage };
@@ -3158,6 +3177,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         compactedSinceLatestAssistantUsage: false,
         hasSubagents: false,
         nextSyntheticAssistantBlockIndex: -1,
+        authenticationFailureMessage: undefined,
+        rejectedRateLimitTypes: new Set(),
       };
       context.session = {
         ...context.session,
@@ -3216,6 +3237,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     if (context.turnState) {
+      // The CLI can report authentication failure before ending the turn as a
+      // generic API error, so retain that evidence for the result fallback.
+      if (message.error === "authentication_failed") {
+        context.turnState.authenticationFailureMessage = claudeSignedOutMessage({
+          configDir: claudeEnvironment.CLAUDE_CONFIG_DIR,
+          cwd: path.resolve(context.session.cwd ?? "."),
+        });
+      }
       context.turnState.items.push(message.message);
       if (
         normalizeClaudeActiveTokenUsage(
@@ -3242,7 +3271,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    const { status, errorMessage } = resultOutcome(message);
+    const turn = context.turnState;
+    const failureHint =
+      turn?.authenticationFailureMessage ??
+      (turn && turn.rejectedRateLimitTypes.size > 0
+        ? "Claude usage limit reached. Send the message again once the limit resets."
+        : undefined);
+    const { status, errorMessage } = resultOutcome(message, failureHint);
 
     if (status === "failed") {
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
@@ -3472,7 +3507,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           context.turnState.hasSubagents = true;
         }
         // Model/effort: the Agent tool's input carries explicit overrides;
-        // absent ones inherit the session's selection (SDK behavior).
+        // absent models preserve the same task's selection on SendMessage
+        // reactivation, or inherit the session's selection for new tasks.
         // Subagent assistant snapshots refine model with the authoritative API
         // id: one that already arrived is buffered and outranks the seed here,
         // later ones refine the record in place. AgentInput.effort may be a
@@ -3486,6 +3522,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         const model =
           bufferedModel ??
           trimmedString(launchInput?.model) ??
+          context.taskAgents.get(message.task_id)?.model ??
           trimmedString(context.session.model ?? undefined);
         const rawLaunchEffort = launchInput?.effort;
         const effort =
@@ -3845,14 +3882,28 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       // Warnings (allowed_warning) still have headroom and stay quiet, an
       // account spending provisioned overage keeps running despite the reject,
       // and between turns there is no turn to report as paused.
-      if (
-        rateLimitInfo.status === "rejected" &&
-        rateLimitInfo.overageStatus !== "allowed" &&
-        rateLimitInfo.overageStatus !== "allowed_warning" &&
-        rateLimitInfo.isUsingOverage !== true &&
-        rateLimitInfo.overageInUse !== true &&
-        context.turnState !== undefined
-      ) {
+      const overageAllowed =
+        rateLimitInfo.overageStatus === "allowed" ||
+        rateLimitInfo.overageStatus === "allowed_warning" ||
+        rateLimitInfo.isUsingOverage === true ||
+        rateLimitInfo.overageInUse === true;
+      const blocked = rateLimitInfo.status === "rejected" && !overageAllowed;
+      const limitType = rateLimitInfo.rateLimitType ?? "unknown";
+      const limitKey = `${limitType}:${rateLimitInfo.resetsAt ?? "unknown"}`;
+      if (context.turnState) {
+        // Current blocking evidence is independent of whether its warning has
+        // already been shown. A recovery can omit or advance the reset time;
+        // its window type remains stable without clearing another window.
+        if (blocked) context.turnState.rejectedRateLimitTypes.add(limitType);
+        else if (
+          rateLimitInfo.status === "allowed" ||
+          rateLimitInfo.status === "allowed_warning" ||
+          overageAllowed
+        ) {
+          context.turnState.rejectedRateLimitTypes.delete(limitType);
+        }
+      }
+      if (blocked && context.turnState !== undefined) {
         // Tracked per turn as a set of limit identities, not as the rendered
         // row: a parked window re-fires while the remaining wait shrinks, and a
         // turn can park on more than one window, so a single slot would let an
@@ -3862,7 +3913,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         if (context.announcedUsageLimits?.turnId !== turnId) {
           context.announcedUsageLimits = { turnId, keys: new Set() };
         }
-        const limitKey = `${rateLimitInfo.rateLimitType ?? "unknown"}:${rateLimitInfo.resetsAt ?? "unknown"}`;
         if (!context.announcedUsageLimits.keys.has(limitKey)) {
           context.announcedUsageLimits.keys.add(limitKey);
           const notice = describeClaudeUsageLimit(
@@ -4193,6 +4243,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           readonly toolUseID?: string;
         },
       ) {
+        // Promote before yielding: incoming input must not close the turn and
+        // dismiss a question whose native callback is still waiting.
+        if (context.turnState?.synthetic === true) {
+          context.turnState.synthetic = false;
+        }
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
 
         // Parse questions from the SDK's AskUserQuestion input.
@@ -4455,6 +4510,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           } satisfies PermissionResult;
         }
 
+        // Approval callbacks own live work just like native questions.
+        if (context.turnState?.synthetic === true) {
+          context.turnState.synthetic = false;
+        }
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
         const requestType = classifyRequestType(toolName);
         const detail = summarizeToolRequest(toolName, toolInput);
@@ -4939,6 +4998,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         compactedSinceLatestAssistantUsage: false,
         hasSubagents: false,
         nextSyntheticAssistantBlockIndex: -1,
+        authenticationFailureMessage: undefined,
+        rejectedRateLimitTypes: new Set(),
       };
 
       const updatedAt = yield* nowIso;

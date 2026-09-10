@@ -1,4 +1,8 @@
 import {
+  CROSS_PROVIDER_RESULT_REQUESTED,
+  readCrossProviderResultDelivery,
+} from "../crossProviderResultDelivery.ts";
+import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -13,6 +17,7 @@ import {
   type CrossProviderAgentErrorOutput,
   type ModelCapabilities,
   type OrchestrationEvent,
+  type OrchestrationCommand,
   type OrchestrationThreadActivity,
   type OrchestrationThreadShell,
   type ServerProvider,
@@ -20,6 +25,7 @@ import {
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -141,6 +147,10 @@ const DEFAULT_PROVIDERS: ReadonlyArray<ServerProvider> = [
 function makeLayer(input?: {
   readonly settings?: Partial<ServerSettings>;
   readonly providers?: ReadonlyArray<ServerProvider>;
+  readonly onDispatch?: (
+    command: OrchestrationCommand,
+    dispatch: ReturnType<OrchestrationEngineService["Service"]["dispatch"]>,
+  ) => ReturnType<OrchestrationEngineService["Service"]["dispatch"]>;
 }) {
   const providers = input?.providers ?? DEFAULT_PROVIDERS;
   const providerRegistry = Layer.succeed(
@@ -172,8 +182,21 @@ function makeLayer(input?: {
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-cross-provider-agent-test-" }),
     ),
   );
+  const observedOrchestration =
+    input?.onDispatch === undefined
+      ? orchestration
+      : Layer.effect(
+          OrchestrationEngineService,
+          Effect.gen(function* () {
+            const engine = yield* OrchestrationEngineService;
+            return OrchestrationEngineService.of({
+              ...engine,
+              dispatch: (command) => input.onDispatch!(command, engine.dispatch(command)),
+            });
+          }),
+        ).pipe(Layer.provideMerge(orchestration));
   return CrossProviderAgentLive.pipe(
-    Layer.provideMerge(orchestration),
+    Layer.provideMerge(observedOrchestration),
     Layer.provideMerge(providerRegistry),
     Layer.provideMerge(
       ServerSettingsService.layerTest({
@@ -380,6 +403,58 @@ const parentActivityAfter = <A, E, R>(
       );
     }),
   );
+
+const parentDeliveryAfter = <A, E, R>(parentId: ThreadId, trigger: Effect.Effect<A, E, R>) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const events = yield* engine.subscribeDomainEvents;
+      yield* trigger;
+      return Option.getOrThrow(
+        yield* events.pipe(
+          Stream.filter(
+            (event): event is Extract<OrchestrationEvent, { type: "thread.activity-appended" }> =>
+              event.type === "thread.activity-appended" &&
+              event.payload.threadId === parentId &&
+              event.payload.activity.kind === CROSS_PROVIDER_RESULT_REQUESTED,
+          ),
+          Stream.runHead,
+        ),
+      );
+    }),
+  );
+
+const readDeliveries = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const projection = yield* ProjectionSnapshotQuery;
+    const detail = yield* projection.getThreadDetailById(threadId);
+    return Option.getOrThrow(detail).activities.flatMap((activity) => {
+      const delivery = readCrossProviderResultDelivery(activity);
+      return Option.isSome(delivery) ? [{ id: activity.id, text: delivery.value.input }] : [];
+    });
+  });
+
+const acknowledgeInput = (threadId: ThreadId, messageId: MessageId, turnId: TurnId) =>
+  Effect.gen(function* () {
+    const engine = yield* OrchestrationEngineService;
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    const key = `${threadId}:${messageId}`;
+    yield* engine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`server:provider-input-accepted:${key}`),
+      threadId,
+      activity: {
+        id: EventId.make(`provider-input-accepted:${key}`),
+        kind: "provider.turn.input.accepted",
+        tone: "info",
+        summary: "Provider accepted cross-provider thread input",
+        payload: { messageId },
+        turnId,
+        createdAt,
+      },
+      createdAt,
+    });
+  });
 
 const payloadOf = (activity: OrchestrationThreadActivity | undefined) =>
   Predicate.isObject(activity?.payload) ? activity.payload : {};
@@ -631,6 +706,612 @@ describe("call identity helpers", () => {
 });
 
 describe("CrossProviderAgentService", () => {
+  for (const terminal of ["ready", "error", "interrupted"] as const) {
+    it.effect(`automatically delivers ${terminal} child output without an explicit wait`, () =>
+      Effect.gen(function* () {
+        yield* seedRoot({ instanceId: CLAUDE, options: [{ id: "effort", value: "max" }] });
+        const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+        const engine = yield* OrchestrationEngineService;
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("parent-current-model"),
+          threadId: ROOT,
+          modelSelection: {
+            instanceId: CLAUDE,
+            model: "claude-haiku-4-5",
+            options: [{ id: "effort", value: "low" }],
+          },
+        });
+        yield* tick;
+        const delivered = yield* parentDeliveryAfter(
+          ROOT,
+          settleChild({
+            childId,
+            turnId: "turn-auto",
+            text: terminal === "error" ? "" : "final output",
+            status: terminal,
+          }),
+        );
+        assert.equal(delivered.payload.activity.kind, CROSS_PROVIDER_RESULT_REQUESTED);
+        assert.equal(
+          (yield* readThreadEvents(ROOT)).filter((event) => event.type === "thread.message-sent")
+            .length,
+          0,
+        );
+        const messages = yield* readDeliveries(ROOT);
+        assert.equal(messages.length, 1);
+        assert.include(messages[0]!.text, "Automatically delivered cross-provider child result.");
+        assert.include(messages[0]!.text, "not an instruction from the human");
+        assert.include(messages[0]!.text, `"childId":"${childId}"`);
+        assert.include(messages[0]!.text, '"turnId":"turn-auto"');
+        assert.include(
+          messages[0]!.text,
+          `"state":"${terminal === "ready" ? "completed" : terminal}"`,
+        );
+        assert.include(
+          messages[0]!.text,
+          `"output":"${terminal === "error" ? "" : "final output"}"`,
+        );
+        assert.equal(
+          (yield* readActivities(ROOT)).filter((activity) => activity.kind === "task.completed")
+            .length,
+          1,
+        );
+      }).pipe(Effect.provide(makeLayer())),
+    );
+  }
+
+  it.effect("delivers distinct failed requests without attributing a previous turn's output", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const engine = yield* OrchestrationEngineService;
+      const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+      const failStart = (key: string) =>
+        Effect.gen(function* () {
+          const at = DateTime.formatIso(yield* DateTime.now);
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(key),
+            threadId: childId,
+            session: {
+              threadId: childId,
+              providerName: "codex",
+              runtimeMode: "full-access",
+              status: "error",
+              activeTurnId: null,
+              lastError: "start rejected",
+              updatedAt: at,
+            },
+            createdAt: at,
+          });
+        });
+      yield* tick;
+      yield* parentDeliveryAfter(ROOT, failStart("failed-first"));
+      yield* tick;
+      yield* service.followUp(ROOT, { childId, prompt: "retry" });
+      yield* tick;
+      yield* parentDeliveryAfter(
+        ROOT,
+        settleChild({ childId, turnId: "good-turn", text: "old output" }),
+      );
+      yield* tick;
+      yield* service.followUp(ROOT, { childId, prompt: "another" });
+      yield* tick;
+      yield* parentDeliveryAfter(ROOT, failStart("failed-follow-up"));
+      yield* service.wait(ROOT, { childIds: [childId] });
+      const messages = yield* readDeliveries(ROOT);
+      assert.equal(messages.length, 3);
+      assert.equal(new Set(messages.map((message) => message.id)).size, 3);
+      for (const index of [0, 2]) {
+        assert.include(messages[index]!.text, '"turnId":null');
+        assert.include(messages[index]!.text, '"output":""');
+        assert.notInclude(messages[index]!.text, "old output");
+      }
+      // Stored retrieval retains its existing fallback behavior.
+      const result = yield* service.result(ROOT, { childId });
+      if (isCrossProviderAgentErrorOutput(result)) return yield* Effect.die(result.error.code);
+      assert.equal(result.output, "old output");
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
+  for (const automatic of [true, false]) {
+    it.effect(
+      `settles a nested Claude orchestrator after an active ${automatic ? "automatic result" : "ordinary steer"} input`,
+      () =>
+        Effect.gen(function* () {
+          yield* seedRoot({ instanceId: CODEX, model: "gpt-5.6-sol" });
+          const service = yield* CrossProviderAgentService;
+          const engine = yield* OrchestrationEngineService;
+          const parent = yield* service.spawn(ROOT, {
+            providerInstanceId: CLAUDE,
+            model: "claude-fable-5-1",
+            prompt: "Delegate and finish",
+            allowOrchestration: true,
+          });
+          if (isCrossProviderAgentErrorOutput(parent)) return yield* Effect.die(parent.error.code);
+          const parentId = ThreadId.make(parent.childId);
+          yield* tick;
+          const runningAt = DateTime.formatIso(yield* DateTime.now);
+          yield* engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("nested-claude-running"),
+            threadId: parentId,
+            session: {
+              threadId: parentId,
+              providerName: "claudeAgent",
+              providerInstanceId: CLAUDE,
+              runtimeMode: "full-access",
+              status: "running",
+              activeTurnId: TurnId.make("nested-claude-turn"),
+              lastError: null,
+              updatedAt: runningAt,
+            },
+            createdAt: runningAt,
+          });
+          const before = yield* readShell(parentId);
+          yield* tick;
+          let inputMessageId = MessageId.make("ordinary-steer");
+          if (automatic) {
+            const childId = ThreadId.make((yield* spawnSol(parentId)).childId);
+            yield* tick;
+            const delivery = yield* parentDeliveryAfter(
+              parentId,
+              settleChild({ childId, turnId: "grandchild-turn", text: "grandchild output" }),
+            );
+            inputMessageId = MessageId.make(delivery.payload.activity.id);
+          } else {
+            yield* engine.dispatch({
+              type: "thread.turn.start",
+              commandId: CommandId.make("ordinary-steer"),
+              threadId: parentId,
+              message: {
+                messageId: MessageId.make("ordinary-steer"),
+                role: "user",
+                text: "Also check tests",
+                attachments: [],
+              },
+              runtimeMode: "full-access",
+              interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+              createdAt: DateTime.formatIso(yield* DateTime.now),
+            });
+          }
+          const afterInput = yield* readShell(parentId);
+          yield* tick;
+          // ClaudeAdapter's native active-input tests prove that steering retains
+          // this turn ID; ingest its final text and completion into the real engine.
+          const completeParent = Effect.gen(function* () {
+            const completedAt = DateTime.formatIso(yield* DateTime.now);
+            yield* engine.dispatch({
+              type: "thread.message.assistant.delta",
+              commandId: CommandId.make("nested-claude-final-text"),
+              threadId: parentId,
+              messageId: assistantMessageId(parentId, "nested-claude-turn"),
+              turnId: TurnId.make("nested-claude-turn"),
+              delta: "orchestrator final output",
+              createdAt: completedAt,
+            });
+            yield* completeAssistantMessage(parentId, "nested-claude-turn");
+            yield* engine.dispatch({
+              type: "thread.session.set",
+              commandId: CommandId.make("nested-claude-completed"),
+              threadId: parentId,
+              session: {
+                threadId: parentId,
+                providerName: "claudeAgent",
+                providerInstanceId: CLAUDE,
+                runtimeMode: "full-access",
+                status: "ready",
+                activeTurnId: null,
+                lastError: null,
+                updatedAt: completedAt,
+              },
+              createdAt: completedAt,
+            });
+          });
+          const acknowledgement = acknowledgeInput(
+            parentId,
+            inputMessageId,
+            TurnId.make("nested-claude-turn"),
+          );
+          if (automatic) {
+            yield* completeParent;
+            const pending = yield* service.result(ROOT, { childId: parentId });
+            expectError(pending, "child_not_settled");
+            yield* parentDeliveryAfter(ROOT, acknowledgement);
+          } else {
+            yield* acknowledgement;
+            yield* parentDeliveryAfter(ROOT, completeParent);
+          }
+          const afterCompletion = yield* readShell(parentId);
+          assert.equal(afterCompletion.latestTurn?.state, "completed");
+          assert.equal(afterCompletion.latestTurn?.requestedAt, before.latestTurn?.requestedAt);
+          if (automatic) assert.equal(afterInput.latestUserMessageAt, before.latestUserMessageAt);
+          else assert.isTrue(afterInput.latestUserMessageAt! > before.latestTurn!.requestedAt);
+          const result = yield* service.result(ROOT, { childId: parentId });
+          if (isCrossProviderAgentErrorOutput(result)) return yield* Effect.die(result.error.code);
+          assert.equal(result.state, "completed");
+          assert.equal(result.output, "orchestrator final output");
+          const waited = yield* service.wait(ROOT, { childIds: [parentId] });
+          if (isCrossProviderAgentErrorOutput(waited)) return yield* Effect.die(waited.error.code);
+          assert.equal(waited.children[0]?.settled, true);
+          const deliveries = yield* readDeliveries(ROOT);
+          assert.equal(deliveries.length, 1);
+          assert.include(deliveries[0]!.text, '"turnId":"nested-claude-turn"');
+          assert.include(deliveries[0]!.text, "orchestrator final output");
+          yield* tick;
+          const followUp = yield* service.followUp(ROOT, {
+            childId: parentId,
+            prompt: "Genuine next turn",
+          });
+          assert.isFalse(isCrossProviderAgentErrorOutput(followUp));
+          // The prior same-turn acknowledgement must not match this new request.
+          expectError(yield* service.result(ROOT, { childId: parentId }), "child_not_settled");
+        }).pipe(Effect.provide(makeLayer({ settings: { crossProviderAgentMaxDepth: 3 } }))),
+    );
+  }
+
+  it.effect("keeps an acknowledged Codex queued turn pending until that turn completes", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+      yield* tick;
+      yield* parentDeliveryAfter(
+        ROOT,
+        settleChild({ childId, turnId: "previous-turn", text: "previous output" }),
+      );
+      yield* tick;
+      yield* service.followUp(ROOT, { childId, prompt: "Queued work" });
+      const request = (yield* readThreadEvents(childId)).findLast(
+        (event) => event.type === "thread.turn-start-requested",
+      );
+      if (request?.type !== "thread.turn-start-requested")
+        return yield* Effect.die("missing request");
+      yield* acknowledgeInput(childId, request.payload.messageId, TurnId.make("queued-turn"));
+      expectError(yield* service.result(ROOT, { childId }), "child_not_settled");
+      expectError(
+        yield* service.followUp(ROOT, { childId, prompt: "too early" }),
+        "child_not_settled",
+      );
+      assert.equal((yield* readDeliveries(ROOT)).length, 1);
+      yield* tick;
+      yield* parentDeliveryAfter(
+        ROOT,
+        settleChild({ childId, turnId: "queued-turn", text: "queued output" }),
+      );
+      const result = yield* service.result(ROOT, { childId });
+      if (isCrossProviderAgentErrorOutput(result)) return yield* Effect.die(result.error.code);
+      assert.equal(result.output, "queued output");
+      assert.equal((yield* readDeliveries(ROOT)).length, 2);
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
+  it.effect("delivers only to a nested child's immediate parent", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const parentId = ThreadId.make((yield* spawnSol(ROOT, { allowOrchestration: true })).childId);
+      const child = yield* service.spawn(parentId, {
+        providerInstanceId: CLAUDE,
+        model: "claude-haiku-4-5",
+        prompt: "nested work",
+      });
+      if (isCrossProviderAgentErrorOutput(child)) return yield* Effect.die(child.error.code);
+      yield* tick;
+      yield* parentDeliveryAfter(
+        parentId,
+        settleChild({
+          childId: ThreadId.make(child.childId),
+          turnId: "nested-turn",
+          text: "nested output",
+        }),
+      );
+      assert.equal((yield* readDeliveries(parentId)).length, 1);
+      assert.equal((yield* readDeliveries(ROOT)).length, 0);
+    }).pipe(Effect.provide(makeLayer({ settings: { crossProviderAgentMaxDepth: 3 } }))),
+  );
+
+  it.effect("keeps every queued hidden input pending beyond the client activity window", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const engine = yield* OrchestrationEngineService;
+      const projection = yield* ProjectionSnapshotQuery;
+      const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+      yield* tick;
+      yield* parentDeliveryAfter(
+        ROOT,
+        settleChild({ childId, turnId: "before-hidden", text: "Earlier output" }),
+      );
+      const request = (suffix: string) =>
+        Effect.gen(function* () {
+          const createdAt = DateTime.formatIso(yield* DateTime.now);
+          const id = EventId.make(`xp-agent:result-delivery:${suffix}`);
+          yield* engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`server:${id}`),
+            threadId: childId,
+            activity: {
+              id,
+              kind: CROSS_PROVIDER_RESULT_REQUESTED,
+              tone: "info",
+              summary: "Result input",
+              payload: {
+                timelineBypass: true,
+                childThreadId: "grandchild",
+                childRequestId: suffix,
+                childTurnId: suffix,
+                input: `Immutable ${suffix}`,
+              },
+              turnId: null,
+              createdAt,
+            },
+            createdAt,
+          });
+          return MessageId.make(id);
+        });
+      yield* tick;
+      const first = yield* request("first");
+      yield* acknowledgeInput(childId, first, TurnId.make("queued-first"));
+      yield* tick;
+      const second = yield* request("second");
+      // Neither latest completed turn nor a newer queued acknowledgement can
+      // erase an earlier pending input.
+      yield* acknowledgeInput(childId, second, TurnId.make("queued-second"));
+      expectError(yield* service.result(ROOT, { childId }), "child_not_settled");
+      yield* tick;
+      yield* settleChild({ childId, turnId: "queued-second", text: "second finished first" });
+      expectError(yield* service.result(ROOT, { childId }), "child_not_settled");
+      for (let index = 0; index < 501; index++) {
+        yield* acknowledgeInput(
+          childId,
+          MessageId.make(`unrelated-${index}`),
+          TurnId.make("queued-second"),
+        );
+      }
+      assert.equal(
+        Option.getOrThrow(yield* projection.getThreadDetailById(childId)).activities.length,
+        500,
+      );
+      expectError(yield* service.result(ROOT, { childId }), "child_not_settled");
+      const pending = yield* projection.getCrossProviderResultDeliveries(childId);
+      assert.equal(pending.length, 2);
+      assert.equal(pending[0]?.acceptedTurnId, "queued-first");
+      yield* tick;
+      yield* settleChild({ childId, turnId: "queued-first", text: "all inputs finished" });
+      const result = yield* service.result(ROOT, { childId });
+      if (isCrossProviderAgentErrorOutput(result)) return yield* Effect.die(result.error.code);
+      assert.equal(result.output, "all inputs finished");
+      assert.equal((yield* projection.getCrossProviderResultDeliveries(childId)).length, 1);
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
+  it.effect("a failed hidden input cannot settle its still-running parent turn", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const engine = yield* OrchestrationEngineService;
+      const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+      yield* tick;
+      let createdAt = DateTime.formatIso(yield* DateTime.now);
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("active-parent"),
+        threadId: childId,
+        session: {
+          threadId: childId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: TurnId.make("still-working"),
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+      yield* tick;
+      createdAt = DateTime.formatIso(yield* DateTime.now);
+      const id = EventId.make("xp-agent:result-delivery:active-failure");
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`server:${id}`),
+        threadId: childId,
+        activity: {
+          id,
+          kind: CROSS_PROVIDER_RESULT_REQUESTED,
+          tone: "info",
+          summary: "Result input",
+          payload: {
+            timelineBypass: true,
+            childThreadId: "grandchild",
+            childRequestId: "request",
+            childTurnId: "grandchild-turn",
+            input: "Immutable result",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("active-input-failed"),
+        threadId: childId,
+        activity: {
+          id: EventId.make(`provider-input-failed:${childId}:${id}`),
+          kind: "provider.turn.start.failed",
+          tone: "error",
+          summary: "Input rejected",
+          payload: { requestId: id, detail: "Input rejected" },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+      expectError(yield* service.result(ROOT, { childId }), "child_not_settled");
+      assert.equal((yield* readDeliveries(ROOT)).length, 0);
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
+  it.effect("settles a hidden delivery that fails before starting without reusing old output", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const engine = yield* OrchestrationEngineService;
+      const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+      yield* tick;
+      yield* parentDeliveryAfter(
+        ROOT,
+        settleChild({ childId, turnId: "old-turn", text: "Old output" }),
+      );
+      yield* tick;
+      const createdAt = DateTime.formatIso(yield* DateTime.now);
+      const requestId = EventId.make("xp-agent:result-delivery:failed-hidden");
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`server:${requestId}`),
+        threadId: childId,
+        activity: {
+          id: requestId,
+          kind: CROSS_PROVIDER_RESULT_REQUESTED,
+          tone: "info",
+          summary: "Result input",
+          payload: {
+            timelineBypass: true,
+            childThreadId: "grandchild",
+            childRequestId: "grandchild-request",
+            childTurnId: "grandchild-turn",
+            input: "Result",
+          },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+      expectError(yield* service.result(ROOT, { childId }), "child_not_settled");
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("failed-hidden"),
+        threadId: childId,
+        activity: {
+          id: EventId.make(`provider-input-failed:${childId}:${requestId}`),
+          kind: "provider.turn.start.failed",
+          tone: "error",
+          summary: "Cross-provider result delivery failed",
+          payload: { requestId, detail: "Provider rejected input" },
+          turnId: null,
+          createdAt,
+        },
+        createdAt,
+      });
+      const result = yield* service.result(ROOT, { childId });
+      if (isCrossProviderAgentErrorOutput(result)) return yield* Effect.die(result.error.code);
+      assert.equal(result.state, "error");
+      // A later ordinary follow-up is independent of this failed request.
+      yield* tick;
+      yield* service.followUp(ROOT, { childId, prompt: "Retry normally" });
+      yield* tick;
+      yield* parentDeliveryAfter(
+        ROOT,
+        settleChild({ childId, turnId: "retry-turn", text: "Retry output" }),
+      );
+      const retried = yield* service.result(ROOT, { childId });
+      if (isCrossProviderAgentErrorOutput(retried)) return yield* Effect.die(retried.error.code);
+      assert.equal(retried.state, "completed");
+      assert.equal(retried.output, "Retry output");
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
+  it.effect("delivery dispatch rejection leaves intentional wait output intact", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+      yield* tick;
+      yield* settleChild({ childId, turnId: "rejected-delivery", text: "retained output" });
+      const result = yield* service.wait(ROOT, { childIds: [childId] });
+      if (isCrossProviderAgentErrorOutput(result)) return yield* Effect.die(result.error.code);
+      assert.equal(result.children[0]?.output, "retained output");
+      assert.equal((yield* readDeliveries(ROOT)).length, 0);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          onDispatch: (command, dispatch) =>
+            command.commandId.startsWith("server:xp-agent:result-delivery:")
+              ? Effect.die(new Error("Injected parent delivery rejection"))
+              : dispatch,
+        }),
+      ),
+    ),
+  );
+
+  it.effect("does not recreate or deliver to a deleted parent", () =>
+    Effect.gen(function* () {
+      const observed = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        yield* seedRoot();
+        const engine = yield* OrchestrationEngineService;
+        const projection = yield* ProjectionSnapshotQuery;
+        const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+        yield* engine.dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("delete-parent"),
+          threadId: ROOT,
+        });
+        yield* tick;
+        yield* settleChild({ childId, turnId: "deleted-parent-turn", text: "done" });
+        yield* Deferred.await(observed);
+        assert.isTrue(Option.isNone(yield* projection.getThreadShellById(ROOT)));
+        assert.equal(
+          (yield* readThreadEvents(ROOT)).filter(
+            (event) => event.type === "thread.turn-start-requested",
+          ).length,
+          0,
+        );
+      }).pipe(
+        Effect.provide(
+          makeLayer({
+            onDispatch: (command, dispatch) =>
+              command.type === "thread.activity.append" &&
+              command.activity.kind === "task.completed"
+                ? dispatch.pipe(Effect.ensuring(Deferred.succeed(observed, undefined)))
+                : dispatch,
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("does not revive a stopped parent", () =>
+    Effect.gen(function* () {
+      yield* seedRoot();
+      const service = yield* CrossProviderAgentService;
+      const engine = yield* OrchestrationEngineService;
+      const childId = ThreadId.make((yield* spawnSol(ROOT)).childId);
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("stop-parent"),
+        threadId: ROOT,
+        session: {
+          threadId: ROOT,
+          providerName: "claudeAgent",
+          runtimeMode: "full-access",
+          status: "stopped",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW,
+        },
+        createdAt: NOW,
+      });
+      yield* tick;
+      yield* settleChild({ childId, turnId: "stopped-parent-turn", text: "done" });
+      yield* service.wait(ROOT, { childIds: [childId] });
+      assert.equal((yield* readDeliveries(ROOT)).length, 0);
+      assert.equal((yield* readShell(ROOT)).session?.status, "stopped");
+    }).pipe(Effect.provide(makeLayer())),
+  );
+
   it.effect("catalog lists eligible routes exactly and flags the caller's own instance", () =>
     Effect.gen(function* () {
       yield* seedRoot();
@@ -842,6 +1523,7 @@ describe("CrossProviderAgentService", () => {
       // the runtime produced before finalize and settle were sequenced).
       yield* settleChild({ childId, turnId: "turn-1", text: "final answer", leaveStreaming: true });
       const waiting = yield* service.wait(ROOT, { childIds: [childId] }).pipe(Effect.forkScoped);
+      assert.equal((yield* readDeliveries(ROOT)).length, 0);
       // Nothing settles yet: a wait with a timeout still reports running.
       yield* tick;
       yield* completeAssistantMessage(childId, "turn-1");
@@ -1026,6 +1708,11 @@ describe("CrossProviderAgentService", () => {
       const again = yield* service.wait(ROOT, { childIds: [childId], timeoutSeconds: 1 });
       if (isCrossProviderAgentErrorOutput(again)) return yield* Effect.die(again.error.code);
       assert.equal(again.children[0]?.settled, true);
+      const deliveries = yield* readDeliveries(ROOT);
+      assert.equal(deliveries.length, 1);
+      assert.include(deliveries[0]!.text, '"truncated":true');
+      assert.include(deliveries[0]!.text, "agent_result");
+      assert.include(deliveries[0]!.text, '"totalChars":800');
     }).pipe(
       Effect.scoped,
       Effect.provide(makeLayer({ settings: { crossProviderAgentOutputCapChars: 500 } })),
