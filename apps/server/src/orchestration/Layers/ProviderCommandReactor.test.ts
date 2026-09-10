@@ -171,6 +171,7 @@ describe("ProviderCommandReactor", () => {
     readonly baseDir?: string;
     readonly crossProviderChild?: boolean;
     readonly rejectResultAcknowledgement?: boolean;
+    readonly rejectNativeAnswerRecording?: boolean;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
@@ -430,6 +431,12 @@ describe("ProviderCommandReactor", () => {
           getThreadReplayStats: engine.getThreadReplayStats,
           dispatch: (command) => {
             if (
+              input?.rejectNativeAnswerRecording &&
+              command.type === "thread.native-answer.record"
+            ) {
+              return Effect.die("Injected native answer persistence failure");
+            }
+            if (
               input?.rejectResultAcknowledgement &&
               command.type === "thread.activity.append" &&
               command.activity.kind === "provider.turn.input.accepted"
@@ -499,7 +506,8 @@ describe("ProviderCommandReactor", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
-    const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
+    const runEffect = <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) =>
+      runtime!.runPromise(effect);
 
     await Effect.runPromise(
       engine.dispatch({
@@ -4141,6 +4149,27 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("unreadable-native-request"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+        activity: {
+          id: EventId.make("unreadable-native-request"),
+          kind: "user-input.requested",
+          summary: "Question",
+          tone: "approval",
+          turnId: TurnId.make("native-turn"),
+          createdAt: now,
+          payload: {
+            requestId: "user-input-request-1",
+            questions: [{ id: "sandbox_mode", question: "Which mode?" }],
+          },
+        },
+      }),
+    );
+
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.user-input.respond",
@@ -4162,7 +4191,188 @@ describe("ProviderCommandReactor", () => {
         sandbox_mode: "workspace-write",
       },
     });
+    const messages = await harness.runEffect(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        return yield* sql<{
+          readonly text: string;
+          readonly turnId: string;
+        }>`SELECT text, turn_id AS "turnId" FROM projection_thread_messages WHERE thread_id = 'thread-1' AND role = 'user'`;
+      }),
+    );
+    expect(messages).toEqual([{ text: "Which mode?\nworkspace-write", turnId: "native-turn" }]);
   });
+
+  for (const outcome of [
+    "success",
+    "stale",
+    "failure",
+    "no-session",
+    "unsupported",
+    "record-failure",
+  ] as const) {
+    effectIt.effect(`records a native human answer only after acceptance: ${outcome}`, () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() =>
+          createHarness({ rejectNativeAnswerRecording: outcome === "record-failure" }),
+        );
+        const threadId = ThreadId.make("thread-1");
+        const requestId = asApprovalRequestId("native-question");
+        const turnId = TurnId.make("native-turn");
+        const now = "2026-01-01T00:00:00.000Z";
+        const submittedAt = "2026-01-01T00:01:00.000Z";
+        const answers =
+          outcome === "unsupported"
+            ? { " key ": { unexpected: true }, multi: [" One ", "Two\ncontinued"] }
+            : { " key ": "  exact answer\ncontinued  ", multi: [" One ", "Two\ncontinued"] };
+        if (outcome === "stale" || outcome === "failure") {
+          harness.respondToUserInput.mockImplementation(() =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: ProviderDriverKind.make("claudeAgent"),
+                method: "item/tool/respondToUserInput",
+                detail:
+                  outcome === "stale"
+                    ? "Unknown pending Codex user input request: native-question"
+                    : "Callback rejected",
+              }),
+            ),
+          );
+        }
+        if (outcome !== "no-session") {
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("native-session"),
+            threadId,
+            session: {
+              threadId,
+              status: "running",
+              providerName: "claudeAgent",
+              runtimeMode: "approval-required",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          });
+        }
+        yield* harness.engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make("native-request"),
+          threadId,
+          activity: {
+            id: EventId.make("native-request"),
+            kind: "user-input.requested",
+            summary: "Question",
+            tone: "approval",
+            turnId,
+            createdAt: now,
+            payload: {
+              requestId,
+              questions: [
+                { id: " key ", header: "Q", question: " First question? ", options: [] },
+                {
+                  id: "multi",
+                  header: "Q2",
+                  question: "Second question?",
+                  options: [
+                    { label: " One ", description: "" },
+                    { label: "Two\ncontinued", description: "" },
+                  ],
+                },
+              ],
+            },
+          },
+          createdAt: now,
+        });
+        const before = yield* Effect.promise(() => harness.readModel());
+        yield* harness.engine.dispatch({
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("native-submit"),
+          threadId,
+          requestId,
+          answers,
+          createdAt: submittedAt,
+        });
+        yield* Effect.promise(() => harness.drain());
+        if (outcome === "success") {
+          // A second acceptance attempt must use the same durable recording identity.
+          yield* harness.engine.dispatch({
+            type: "thread.user-input.respond",
+            commandId: CommandId.make("native-submit-again"),
+            threadId,
+            requestId,
+            answers,
+            createdAt: submittedAt,
+          });
+          yield* Effect.promise(() => harness.drain());
+        }
+        // Runtime echoes, including abort/cleanup resolutions, are never human submissions.
+        for (const suffix of ["echo", "duplicate-echo", "abort"]) {
+          yield* harness.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(suffix),
+            threadId,
+            activity: {
+              id: EventId.make(suffix),
+              kind: "user-input.resolved",
+              summary: "User input submitted",
+              tone: "info",
+              turnId,
+              createdAt: submittedAt,
+              payload: { requestId, answers: suffix === "abort" ? {} : answers },
+            },
+            createdAt: submittedAt,
+          });
+        }
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (entry) => entry.id === threadId,
+        )!;
+        expect(thread.messages.filter((message) => message.role === "user")).toEqual(
+          outcome === "success"
+            ? [
+                expect.objectContaining({
+                  role: "user",
+                  text: " First question? \n  exact answer\ncontinued  \n\nSecond question?\n One \nTwo\ncontinued",
+                  turnId,
+                  streaming: false,
+                  attachments: [],
+                  createdAt: submittedAt,
+                }),
+              ]
+            : [],
+        );
+        expect(thread.latestTurn).toEqual(
+          before.threads.find((entry) => entry.id === threadId)?.latestTurn,
+        );
+        expect(yield* Effect.promise(() => harness.readPendingTurnStarts())).toEqual([]);
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        expect(harness.interruptTurn).not.toHaveBeenCalled();
+        expect(harness.respondToUserInput).toHaveBeenCalledTimes(
+          outcome === "no-session" ? 0 : outcome === "success" ? 2 : 1,
+        );
+        if (outcome !== "no-session")
+          expect(harness.respondToUserInput.mock.calls[0]?.[0]).toEqual({
+            threadId,
+            requestId,
+            answers,
+          });
+        if (outcome === "record-failure")
+          expect(
+            thread.activities.some(
+              (activity) => activity.kind === "provider.user-input.respond.failed",
+            ),
+          ).toBe(false);
+        if (["stale", "failure", "no-session"].includes(outcome))
+          expect(
+            thread.activities.some(
+              (activity) => activity.kind === "provider.user-input.respond.failed",
+            ),
+          ).toBe(true);
+      }),
+    );
+  }
 
   it("normalizes stale Codex approval callbacks without faking approval resolution", async () => {
     const harness = await createHarness();

@@ -4,6 +4,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   ApprovalRequestId,
   type OrchestrationReadModel,
   type OrchestrationThreadActivity,
@@ -137,6 +138,76 @@ it.layer(NodeServices.layer)("user input dismiss decider", (it) => {
         _tag: "OrchestrationCommandInvariantError",
         detail: "This question has already been answered.",
       });
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("native and async answer presentation", (it) => {
+  it.effect(
+    "records an accepted native answer on its existing turn and deduplicates its message",
+    () =>
+      Effect.gen(function* () {
+        let readModel = makeReadModel([]);
+        const record = {
+          type: "thread.native-answer.record" as const,
+          commandId: CommandId.make("native-record"),
+          threadId,
+          requestId,
+          turnId: TurnId.make("existing-turn"),
+          text: "Question?\n  exact answer  ",
+          causationEventId: EventId.make("client-submission"),
+          createdAt: NOW,
+        };
+        for (const sequence of [1, 2]) {
+          const result = yield* decideOrchestrationCommand({ command: record, readModel });
+          const events = Array.isArray(result) ? result : [result];
+          expect(events).toHaveLength(1);
+          expect(events[0]).toMatchObject({
+            type: "thread.message-sent",
+            causationEventId: record.causationEventId,
+            payload: {
+              role: "user",
+              text: record.text,
+              turnId: record.turnId,
+              streaming: false,
+              attachments: [],
+              createdAt: NOW,
+            },
+          });
+          readModel = yield* projectEvent(readModel, { ...events[0]!, sequence });
+        }
+        expect(readModel.threads[0]?.messages).toHaveLength(1);
+        expect(readModel.threads[0]?.latestTurn).toBeNull();
+      }),
+  );
+
+  it.effect("keeps the async answer's existing message and turn-start behavior", () =>
+    Effect.gen(function* () {
+      const request = makeRequest("message");
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.user-input.respond",
+          commandId: CommandId.make("async-submit"),
+          threadId,
+          requestId,
+          answers: { "0": " Yes " },
+          createdAt: NOW,
+        },
+        readModel: makeReadModel([request]),
+        userInputActivity: request,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events.filter((event) => event.type === "thread.message-sent")).toEqual([
+        expect.objectContaining({
+          payload: expect.objectContaining({ role: "user", text: "Continue?\nYes" }),
+        }),
+      ]);
+      expect(events.filter((event) => event.type === "thread.turn-start-requested")).toHaveLength(
+        1,
+      );
+      expect(events.some((event) => event.type === "thread.user-input-response-requested")).toBe(
+        false,
+      );
     }),
   );
 });

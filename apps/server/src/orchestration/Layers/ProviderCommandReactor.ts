@@ -66,6 +66,17 @@ const isProviderAdapterValidationError = Schema.is(ProviderAdapterValidationErro
 const isProviderWorkspaceMissingError = Schema.is(ProviderWorkspaceMissingError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
+// Read native keys and question text verbatim: the shared UI decoder normalizes them.
+const decodeNativeAnswerRequest = Schema.decodeUnknownOption(
+  Schema.Struct({
+    questions: Schema.Array(Schema.Struct({ id: Schema.String, question: Schema.String })),
+    responseMode: Schema.optional(Schema.Literal("message")),
+  }),
+);
+const decodeNativeAnswer = Schema.decodeUnknownOption(
+  Schema.Union([Schema.String, Schema.Array(Schema.String)]),
+);
+
 type ProviderIntentEvent = Extract<
   OrchestrationEvent,
   {
@@ -1783,6 +1794,26 @@ const make = Effect.gen(function* () {
         });
       }
 
+      // Capture before the callback can emit its resolved runtime echo.
+      const requestedActivity = yield* projectionSnapshotQuery.getUserInputActivity(event.payload);
+      const request =
+        Option.isSome(requestedActivity) && requestedActivity.value.kind === "user-input.requested"
+          ? decodeNativeAnswerRequest(requestedActivity.value.payload)
+          : Option.none();
+      const replies: string[] = [];
+      if (Option.isSome(request) && request.value.responseMode === undefined) {
+        for (const question of request.value.questions) {
+          const answer = decodeNativeAnswer(event.payload.answers[question.id]);
+          if (Option.isNone(answer)) {
+            replies.length = 0;
+            break;
+          }
+          replies.push(
+            `${question.question}\n${typeof answer.value === "string" ? answer.value : answer.value.join("\n")}`,
+          );
+        }
+      }
+
       yield* providerService
         .respondToUserInput({
           threadId: event.payload.threadId,
@@ -1790,19 +1821,35 @@ const make = Effect.gen(function* () {
           answers: event.payload.answers,
         })
         .pipe(
-          Effect.catchCause((cause) =>
-            appendProviderFailureActivity({
-              threadId: event.payload.threadId,
-              kind: "provider.user-input.respond.failed",
-              summary: "Provider user input response failed",
-              detail: isUnknownPendingUserInputRequestError(cause)
-                ? stalePendingRequestDetail("user-input", event.payload.requestId)
-                : Cause.pretty(cause),
-              turnId: null,
-              createdAt: event.payload.createdAt,
-              requestId: event.payload.requestId,
-            }),
-          ),
+          Effect.matchCauseEffect({
+            onSuccess: () =>
+              Option.isSome(requestedActivity) && replies.length > 0
+                ? orchestrationEngine.dispatch({
+                    type: "thread.native-answer.record",
+                    commandId: CommandId.make(
+                      `native-answer:${encodeURIComponent(event.payload.threadId)}:${encodeURIComponent(event.payload.requestId)}`,
+                    ),
+                    threadId: event.payload.threadId,
+                    requestId: event.payload.requestId,
+                    turnId: requestedActivity.value.turnId,
+                    text: replies.join("\n\n"),
+                    causationEventId: event.eventId,
+                    createdAt: event.payload.createdAt,
+                  })
+                : Effect.void,
+            onFailure: (cause) =>
+              appendProviderFailureActivity({
+                threadId: event.payload.threadId,
+                kind: "provider.user-input.respond.failed",
+                summary: "Provider user input response failed",
+                detail: isUnknownPendingUserInputRequestError(cause)
+                  ? stalePendingRequestDetail("user-input", event.payload.requestId)
+                  : Cause.pretty(cause),
+                turnId: null,
+                createdAt: event.payload.createdAt,
+                requestId: event.payload.requestId,
+              }),
+          }),
         );
     },
   );

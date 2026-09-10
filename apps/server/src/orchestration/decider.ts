@@ -1450,6 +1450,34 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       return [unsettledEvent, sessionSetEvent];
     }
 
+    case "thread.native-answer.record": {
+      yield* requireThread({ readModel, command, threadId: command.threadId });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: { requestId: command.requestId },
+        })),
+        causationEventId: command.causationEventId,
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId: MessageId.make(
+            `native-answer:${encodeURIComponent(command.threadId)}:${encodeURIComponent(command.requestId)}`,
+          ),
+          role: "user",
+          text: command.text,
+          attachments: [],
+          turnId: command.turnId,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.message.assistant.delta": {
       if (isImportedAgentSessionMessageId(command.messageId)) {
         return yield* new OrchestrationCommandInvariantError({

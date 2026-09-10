@@ -1246,7 +1246,19 @@ const ThreadPullRequestSyncCommand = Schema.Struct({
   linkedPullRequest: Schema.optional(ThreadLinkedPullRequest),
 });
 
+const ThreadNativeAnswerRecordCommand = Schema.Struct({
+  type: Schema.Literal("thread.native-answer.record"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+  turnId: Schema.NullOr(TurnId),
+  text: Schema.String,
+  causationEventId: EventId,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadNativeAnswerRecordCommand,
   ThreadAutoSettleCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,

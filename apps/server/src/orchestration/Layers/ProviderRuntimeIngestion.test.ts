@@ -2714,6 +2714,7 @@ describe("ProviderRuntimeIngestion", () => {
       };
       await harness.emitAndDrain([completed]);
       const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.messages.filter((message) => message.role === "user")).toEqual([]);
       expect(thread.session?.activeTurnId).toBeNull();
       expect((await harness.readThreadShell()).hasPendingUserInput).toBe(false);
       expect(derivePendingRequests(thread.activities).userInputs).toHaveLength(0);
@@ -4467,6 +4468,23 @@ describe("ProviderRuntimeIngestion", () => {
     expect(resolvedPayload?.answers).toEqual({
       sandbox_mode: "workspace-write",
     });
+    expect(thread.messages.filter((message) => message.role === "user")).toEqual([]);
+    for (const [index, answers] of [{ sandbox_mode: "workspace-write" }, {}].entries()) {
+      harness.emit({
+        type: "user-input.resolved",
+        eventId: asEventId(`runtime-only-resolution-${index}`),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-user-input"),
+        requestId: ApprovalRequestId.make("req-user-input-1"),
+        payload: { answers },
+      });
+    }
+    await harness.drain();
+    expect(
+      (await harness.readModel()).threads[0]?.messages.filter((message) => message.role === "user"),
+    ).toEqual([]);
   });
 
   it("continues processing runtime events after a single event handler failure", async () => {
