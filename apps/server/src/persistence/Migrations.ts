@@ -12,6 +12,7 @@ import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import ProjectionThreadsSpawn from "./ForkMigrations/001_ProjectionThreadsSpawn.ts";
+import HeartbeatJobs from "./ForkMigrations/002_HeartbeatJobs.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -242,7 +243,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
         // A separate ledger leaves every future official migration ID available.
         yield* run({
           table: "t3_fork_migrations",
-          loader: Migrator.fromRecord({ "1_ProjectionThreadsSpawn": ProjectionThreadsSpawn }),
+          loader: Migrator.fromRecord({
+            "1_ProjectionThreadsSpawn": ProjectionThreadsSpawn,
+            "2_HeartbeatJobs": HeartbeatJobs,
+          }),
         });
       }
       return upstream;

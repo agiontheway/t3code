@@ -42,6 +42,7 @@ import { ProviderInstanceId } from "./providerInstance.ts";
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
 const decodeThreadTurnDiff = Schema.decodeUnknownEffect(ThreadTurnDiff);
+const encodeOrchestrationThreadShell = Schema.encodeEffect(OrchestrationThreadShell);
 // The icon shape understood by clients released before monograms.
 const legacyProjectIcon = Schema.Union([
   Schema.Struct({ kind: Schema.Literal("lucide"), name: Schema.String, color: ProjectIconColor }),
@@ -723,7 +724,7 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
     const oldLinkFields = Schema.Struct({
       linkedPullRequest: Schema.optional(ThreadLinkedPullRequest),
     });
-    const newServerWire = yield* Schema.encodeEffect(OrchestrationThreadShell)({
+    const newServerWire = yield* encodeOrchestrationThreadShell({
       ...oldServerShell,
       pullRequests: [
         {
@@ -1578,6 +1579,43 @@ it.effect("rejects thread history imports without messages", () =>
     );
 
     assert.strictEqual(result._tag, "Failure");
+  }),
+);
+
+it.effect("rejects client-supplied heartbeat provenance on turn start", () =>
+  Effect.gen(function* () {
+    const base = {
+      type: "thread.turn.start",
+      commandId: "cmd-client-heartbeat",
+      threadId: "thread-client-heartbeat",
+      message: {
+        messageId: "user:ordinary",
+        role: "user",
+        text: "ordinary turn",
+        attachments: [],
+      },
+      modelSelection: { instanceId: "codex", model: "gpt-5.6-sol" },
+      runtimeMode: DEFAULT_RUNTIME_MODE,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    } as const;
+    const commandHeartbeat = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        ...base,
+        heartbeat: { jobId: "aaaaaaaa", occurrenceId: "forged", dueAt: base.createdAt },
+      }),
+    );
+    assert.strictEqual(commandHeartbeat._tag, "Failure");
+    const messageHeartbeat = yield* Effect.exit(
+      decodeClientOrchestrationCommand({
+        ...base,
+        message: {
+          ...base.message,
+          heartbeat: { jobId: "aaaaaaaa", occurrenceId: "forged", dueAt: base.createdAt },
+        },
+      }),
+    );
+    assert.strictEqual(messageHeartbeat._tag, "Failure");
   }),
 );
 

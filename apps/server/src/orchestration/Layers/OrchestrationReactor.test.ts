@@ -14,6 +14,7 @@ import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
 import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
+import * as HeartbeatAdmissionReactor from "../../heartbeat/HeartbeatAdmissionReactor.ts";
 import * as AgentAwarenessRelay from "../../relay/AgentAwarenessRelay.ts";
 
 describe("OrchestrationReactor", () => {
@@ -31,6 +32,16 @@ describe("OrchestrationReactor", () => {
 
     runtime = ManagedRuntime.make(
       Layer.effect(OrchestrationReactor, makeOrchestrationReactor).pipe(
+        Layer.provideMerge(
+          Layer.succeed(HeartbeatAdmissionReactor.HeartbeatAdmissionReactor, {
+            start: () => {
+              started.push("heartbeat-admission-reactor");
+              return Effect.void;
+            },
+            attemptReserved: () => Effect.succeed("complete" as const),
+            processReserved: () => Effect.void,
+          }),
+        ),
         Layer.provideMerge(
           Layer.succeed(ProviderRuntimeIngestionService, {
             start: () => {
@@ -112,6 +123,7 @@ describe("OrchestrationReactor", () => {
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
 
     expect(started).toEqual([
+      "heartbeat-admission-reactor",
       "provider-runtime-ingestion",
       "provider-command-reactor",
       "checkpoint-reactor",

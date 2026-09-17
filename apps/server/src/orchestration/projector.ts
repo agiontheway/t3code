@@ -36,6 +36,7 @@ import {
   ThreadCreatedPayload,
   ThreadDeletedPayload,
   ThreadInteractionModeSetPayload,
+  ThreadTurnInterruptRequestedPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
@@ -52,6 +53,7 @@ import {
   ThreadUnsnoozedPayload,
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
+  ThreadSessionStopRequestedPayload,
   ThreadTurnDiffCompletedPayload,
 } from "./Schemas.ts";
 
@@ -805,10 +807,63 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             messages: cappedMessages,
+            // Only an accepted, non-heartbeat user turn is human activation.
+            // Assistant output after an explicit stop must not reopen the fence.
+            explicitStopAt:
+              payload.role === "user" && payload.heartbeat === undefined
+                ? null
+                : thread.explicitStopAt,
+            // The stop sequence persists across ordinary user turns: an old
+            // pre-stop reservation must stay rejected even after a fresh human
+            // turn reactivates schedules. A later stop overwrites it.
+            explicitStopSequence: thread.explicitStopSequence,
             updatedAt: event.occurredAt,
           }),
         };
       });
+
+    case "thread.turn-interrupt-requested":
+      return decodeForEvent(
+        ThreadTurnInterruptRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            relativeInterruptAt: payload.createdAt,
+            relativeInterruptSequence: event.sequence,
+            updatedAt: event.occurredAt,
+          }),
+        })),
+      );
+
+    case "thread.session-stop-requested":
+      return decodeForEvent(
+        ThreadSessionStopRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+          // onlyIfSettled is internal cleanup and must not look like a user stop.
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              explicitStopAt:
+                payload.onlyIfSettled === true ? thread.explicitStopAt : payload.createdAt,
+              explicitStopSequence:
+                payload.onlyIfSettled === true ? thread.explicitStopSequence : event.sequence,
+              updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
 
     case "thread.session-set":
       return Effect.gen(function* () {

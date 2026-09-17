@@ -702,6 +702,129 @@ describe("orchestration projector", () => {
     expect(message?.updatedAt).toBe(completeAt);
   });
 
+  it("only an accepted non-heartbeat user turn clears the explicit-stop fence", async () => {
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    const stoppedAt = "2026-01-01T00:01:00.000Z";
+    const assistantAt = "2026-01-01T00:02:00.000Z";
+    const heartbeatAt = "2026-01-01T00:03:00.000Z";
+    const activatedAt = "2026-01-01T00:04:00.000Z";
+    let model = createEmptyReadModel(createdAt);
+
+    const sendMessage = async (sequence: number, payload: unknown, occurredAt = createdAt) => {
+      model = await Effect.runPromise(
+        projectEvent(
+          model,
+          makeEvent({
+            sequence,
+            type: "thread.message-sent",
+            aggregateKind: "thread",
+            aggregateId: "thread-stop-fence",
+            occurredAt,
+            commandId: `cmd-message-${sequence}`,
+            payload,
+          }),
+        ),
+      );
+      return model.threads[0]?.explicitStopAt;
+    };
+
+    model = await Effect.runPromise(
+      projectEvent(
+        model,
+        makeEvent({
+          sequence: 1,
+          type: "thread.created",
+          aggregateKind: "thread",
+          aggregateId: "thread-stop-fence",
+          occurredAt: createdAt,
+          commandId: "cmd-create-stop-fence",
+          payload: {
+            threadId: "thread-stop-fence",
+            projectId: "project-stop-fence",
+            title: "Stop fence",
+            modelSelection: {
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5.3-codex",
+            },
+            runtimeMode: "full-access",
+            branch: null,
+            worktreePath: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+        }),
+      ),
+    );
+    model = await Effect.runPromise(
+      projectEvent(
+        model,
+        makeEvent({
+          sequence: 2,
+          type: "thread.session-stop-requested",
+          aggregateKind: "thread",
+          aggregateId: "thread-stop-fence",
+          occurredAt: stoppedAt,
+          commandId: "cmd-explicit-stop-fence",
+          payload: { threadId: "thread-stop-fence", createdAt: stoppedAt },
+        }),
+      ),
+    );
+    expect(model.threads[0]?.explicitStopAt).toBe(stoppedAt);
+    expect(
+      await sendMessage(
+        3,
+        {
+          threadId: "thread-stop-fence",
+          messageId: "assistant:late",
+          role: "assistant",
+          text: "late output",
+          turnId: null,
+          streaming: false,
+          createdAt: assistantAt,
+          updatedAt: assistantAt,
+        },
+        assistantAt,
+      ),
+    ).toBe(stoppedAt);
+    expect(
+      await sendMessage(
+        4,
+        {
+          threadId: "thread-stop-fence",
+          messageId: "heartbeat:late",
+          role: "user",
+          text: "scheduled heartbeat",
+          turnId: null,
+          streaming: false,
+          heartbeat: {
+            jobId: "aaaaaaaa",
+            occurrenceId: "late",
+            dueAt: heartbeatAt,
+          },
+          createdAt: heartbeatAt,
+          updatedAt: heartbeatAt,
+        },
+        heartbeatAt,
+      ),
+    ).toBe(stoppedAt);
+    expect(
+      await sendMessage(
+        5,
+        {
+          threadId: "thread-stop-fence",
+          messageId: "user:activation",
+          role: "user",
+          text: "activate",
+          turnId: null,
+          streaming: false,
+          createdAt: activatedAt,
+          updatedAt: activatedAt,
+        },
+        activatedAt,
+      ),
+    ).toBeNull();
+  });
+
   it("prunes reverted turn messages from in-memory thread snapshot", async () => {
     const createdAt = "2026-02-23T10:00:00.000Z";
     const model = createEmptyReadModel(createdAt);
@@ -1070,12 +1193,12 @@ describe("orchestration projector", () => {
     ).toEqual([{ id: "assistant-keep", role: "assistant", turnId: "turn-1" }]);
   });
 
-  it("caps message and checkpoint retention for long-lived threads", async () => {
-    const createdAt = "2026-03-01T10:00:00.000Z";
-    const model = createEmptyReadModel(createdAt);
+  effectIt.effect("caps message and checkpoint retention for long-lived threads", () =>
+    Effect.gen(function* () {
+      const createdAt = "2026-03-01T10:00:00.000Z";
+      const model = createEmptyReadModel(createdAt);
 
-    const afterCreate = await Effect.runPromise(
-      projectEvent(
+      const afterCreate = yield* projectEvent(
         model,
         makeEvent({
           sequence: 1,
@@ -1099,77 +1222,71 @@ describe("orchestration projector", () => {
             updatedAt: createdAt,
           },
         }),
-      ),
-    );
+      );
 
-    const messageEvents: ReadonlyArray<OrchestrationEvent> = Array.from(
-      { length: 2_100 },
-      (_, index) =>
-        makeEvent({
-          sequence: index + 2,
-          type: "thread.message-sent",
-          aggregateKind: "thread",
-          aggregateId: "thread-capped",
-          occurredAt: `2026-03-01T10:00:${String(index % 60).padStart(2, "0")}.000Z`,
-          commandId: `cmd-message-${index}`,
-          payload: {
-            threadId: "thread-capped",
-            messageId: `msg-${index}`,
-            role: "assistant",
-            text: `message-${index}`,
-            turnId: `turn-${index}`,
-            streaming: false,
-            createdAt: `2026-03-01T10:00:${String(index % 60).padStart(2, "0")}.000Z`,
-            updatedAt: `2026-03-01T10:00:${String(index % 60).padStart(2, "0")}.000Z`,
-          },
-        }),
-    );
-    const afterMessages = await messageEvents.reduce<
-      Promise<ReturnType<typeof createEmptyReadModel>>
-    >(
-      (statePromise, event) =>
-        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
-      Promise.resolve(afterCreate),
-    );
+      const messageEvents: ReadonlyArray<OrchestrationEvent> = Array.from(
+        { length: 2_100 },
+        (_, index) =>
+          makeEvent({
+            sequence: index + 2,
+            type: "thread.message-sent",
+            aggregateKind: "thread",
+            aggregateId: "thread-capped",
+            occurredAt: `2026-03-01T10:00:${String(index % 60).padStart(2, "0")}.000Z`,
+            commandId: `cmd-message-${index}`,
+            payload: {
+              threadId: "thread-capped",
+              messageId: `msg-${index}`,
+              role: "assistant",
+              text: `message-${index}`,
+              turnId: `turn-${index}`,
+              streaming: false,
+              createdAt: `2026-03-01T10:00:${String(index % 60).padStart(2, "0")}.000Z`,
+              updatedAt: `2026-03-01T10:00:${String(index % 60).padStart(2, "0")}.000Z`,
+            },
+          }),
+      );
+      let afterMessages = afterCreate;
+      for (const event of messageEvents) {
+        afterMessages = yield* projectEvent(afterMessages, event);
+      }
 
-    const checkpointEvents: ReadonlyArray<OrchestrationEvent> = Array.from(
-      { length: 600 },
-      (_, index) =>
-        makeEvent({
-          sequence: index + 2_102,
-          type: "thread.turn-diff-completed",
-          aggregateKind: "thread",
-          aggregateId: "thread-capped",
-          occurredAt: `2026-03-01T10:30:${String(index % 60).padStart(2, "0")}.000Z`,
-          commandId: `cmd-checkpoint-${index}`,
-          payload: {
-            threadId: "thread-capped",
-            turnId: `turn-${index}`,
-            checkpointTurnCount: index + 1,
-            checkpointRef: `refs/t3/checkpoints/thread-capped/turn/${index + 1}`,
-            status: "ready",
-            files: [],
-            assistantMessageId: `msg-${index}`,
-            completedAt: `2026-03-01T10:30:${String(index % 60).padStart(2, "0")}.000Z`,
-          },
-        }),
-    );
-    const finalState = await checkpointEvents.reduce<
-      Promise<ReturnType<typeof createEmptyReadModel>>
-    >(
-      (statePromise, event) =>
-        statePromise.then((state) => Effect.runPromise(projectEvent(state, event))),
-      Promise.resolve(afterMessages),
-    );
+      const checkpointEvents: ReadonlyArray<OrchestrationEvent> = Array.from(
+        { length: 600 },
+        (_, index) =>
+          makeEvent({
+            sequence: index + 2_102,
+            type: "thread.turn-diff-completed",
+            aggregateKind: "thread",
+            aggregateId: "thread-capped",
+            occurredAt: `2026-03-01T10:30:${String(index % 60).padStart(2, "0")}.000Z`,
+            commandId: `cmd-checkpoint-${index}`,
+            payload: {
+              threadId: "thread-capped",
+              turnId: `turn-${index}`,
+              checkpointTurnCount: index + 1,
+              checkpointRef: `refs/t3/checkpoints/thread-capped/turn/${index + 1}`,
+              status: "ready",
+              files: [],
+              assistantMessageId: `msg-${index}`,
+              completedAt: `2026-03-01T10:30:${String(index % 60).padStart(2, "0")}.000Z`,
+            },
+          }),
+      );
+      let finalState = afterMessages;
+      for (const event of checkpointEvents) {
+        finalState = yield* projectEvent(finalState, event);
+      }
 
-    const thread = finalState.threads[0];
-    expect(thread?.messages).toHaveLength(2_000);
-    expect(thread?.messages[0]?.id).toBe("msg-100");
-    expect(thread?.messages.at(-1)?.id).toBe("msg-2099");
-    expect(thread?.checkpoints).toHaveLength(500);
-    expect(thread?.checkpoints[0]?.turnId).toBe("turn-100");
-    expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
-  });
+      const thread = finalState.threads[0];
+      expect(thread?.messages).toHaveLength(2_000);
+      expect(thread?.messages[0]?.id).toBe("msg-100");
+      expect(thread?.messages.at(-1)?.id).toBe("msg-2099");
+      expect(thread?.checkpoints).toHaveLength(500);
+      expect(thread?.checkpoints[0]?.turnId).toBe("turn-100");
+      expect(thread?.checkpoints.at(-1)?.turnId).toBe("turn-599");
+    }),
+  );
 
   effectIt.effect("keeps the worktree setup record past the activity retention cap", () =>
     Effect.gen(function* () {

@@ -38,6 +38,8 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { HeartbeatOccurrenceId } from "@t3tools/contracts";
+import { HeartbeatScheduler } from "../../heartbeat/HeartbeatService.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import {
   ProviderAdapterRequestError,
@@ -248,6 +250,7 @@ const make = Effect.gen(function* () {
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
+  const heartbeatScheduler = yield* Effect.serviceOption(HeartbeatScheduler);
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -264,6 +267,39 @@ const make = Effect.gen(function* () {
   const threadModelSelections = new Map<string, ModelSelection>();
   const compactingThreadIds = new Set<ThreadId>();
   type QueuedTurnStart = Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>;
+  const recordHeartbeatSendOutcome = (
+    event: QueuedTurnStart,
+    status: "sent" | "failed",
+    error?: string | undefined,
+  ) =>
+    Effect.gen(function* () {
+      const provenance = event.payload.heartbeat;
+      if (Option.isNone(heartbeatScheduler) || provenance === undefined) return;
+      yield* heartbeatScheduler.value
+        .setOccurrenceOutcome(
+          HeartbeatOccurrenceId.make(provenance.occurrenceId),
+          status === "sent"
+            ? {
+                status,
+                providerAcceptedAt: DateTime.formatIso(yield* DateTime.now),
+              }
+            : {
+                status,
+                ...(error === undefined ? {} : { error }),
+              },
+        )
+        .pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("failed to record heartbeat provider outcome", {
+                  occurrenceId: provenance.occurrenceId,
+                  status,
+                  cause: Cause.pretty(cause),
+                }),
+          ),
+        );
+    });
   // Turn starts received while a thread compacts, replayed in order once its session is restored.
   const turnsAfterCompaction = new Map<ThreadId, Array<QueuedTurnStart>>();
   // Replay command id → the queued turn start it re-requests. `sent` settles once the replay's
@@ -1264,12 +1300,15 @@ const make = Effect.gen(function* () {
         return Effect.void;
       }
       const detail = formatFailureDetail(cause);
-      return setThreadSessionErrorOnTurnStartFailure({
-        threadId: event.payload.threadId,
-        detail,
-        createdAt: event.payload.createdAt,
-      }).pipe(
-        Effect.flatMap(() => appendTurnStartFailure("Provider turn start failed", detail)),
+      return recordHeartbeatSendOutcome(event, "failed", detail).pipe(
+        Effect.andThen(
+          setThreadSessionErrorOnTurnStartFailure({
+            threadId: event.payload.threadId,
+            detail,
+            createdAt: event.payload.createdAt,
+          }),
+        ),
+        Effect.andThen(appendTurnStartFailure("Provider turn start failed", detail)),
         Effect.asVoid,
       );
     };
@@ -1508,39 +1547,45 @@ const make = Effect.gen(function* () {
 
     const send = providerService.sendTurn(sendTurnRequest.value).pipe(
       Effect.tap((turn) =>
-        thread.spawn === undefined
-          ? Effect.void
-          : Effect.gen(function* () {
-              const createdAt = DateTime.formatIso(yield* DateTime.now);
-              // Native sendTurn is the acknowledgement: Claude can consume this
-              // message within the current turn, while Codex can return a queued one.
-              const key = `${thread.id}:${event.payload.messageId}`;
-              yield* orchestrationEngine.dispatch({
-                type: "thread.activity.append",
-                commandId: CommandId.make(`server:provider-input-accepted:${key}`),
-                threadId: thread.id,
-                activity: {
-                  id: EventId.make(`provider-input-accepted:${key}`),
-                  kind: "provider.turn.input.accepted",
-                  tone: "info",
-                  summary: "Provider accepted cross-provider thread input",
-                  payload: { messageId: event.payload.messageId },
-                  turnId: turn.turnId,
-                  createdAt,
-                },
-                createdAt,
-              });
-            }).pipe(
-              Effect.catchCause((cause) =>
-                Cause.hasInterruptsOnly(cause)
-                  ? Effect.void
-                  : Effect.logWarning("provider input acknowledgement failed", {
+        recordHeartbeatSendOutcome(event, "sent")
+          .pipe(
+            Effect.andThen(
+              thread.spawn === undefined
+                ? Effect.void
+                : Effect.gen(function* () {
+                    const createdAt = DateTime.formatIso(yield* DateTime.now);
+                    // Native sendTurn is the acknowledgement: Claude can consume this
+                    // message within the current turn, while Codex can return a queued one.
+                    const key = `${thread.id}:${event.payload.messageId}`;
+                    yield* orchestrationEngine.dispatch({
+                      type: "thread.activity.append",
+                      commandId: CommandId.make(`server:provider-input-accepted:${key}`),
                       threadId: thread.id,
-                      messageId: event.payload.messageId,
-                      cause: Cause.pretty(cause),
-                    }),
-              ),
+                      activity: {
+                        id: EventId.make(`provider-input-accepted:${key}`),
+                        kind: "provider.turn.input.accepted",
+                        tone: "info",
+                        summary: "Provider accepted cross-provider thread input",
+                        payload: { messageId: event.payload.messageId },
+                        turnId: turn.turnId,
+                        createdAt,
+                      },
+                      createdAt,
+                    });
+                  }),
             ),
+          )
+          .pipe(
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.failCause(cause)
+                : Effect.logWarning("provider input acknowledgement failed", {
+                    threadId: thread.id,
+                    messageId: event.payload.messageId,
+                    cause: Cause.pretty(cause),
+                  }),
+            ),
+          ),
       ),
       Effect.asVoid,
       Effect.catchCause(recoverTurnStartFailure),

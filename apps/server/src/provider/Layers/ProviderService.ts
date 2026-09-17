@@ -256,6 +256,9 @@ export interface ProviderServiceLiveOptions {
    * test see whether a credential was requested at all.
    */
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
+  /** Test seams for the native provider-owned MCP credential lifecycle. */
+  readonly recoverMcpCredential?: typeof McpSessionRegistry.recoverActiveMcpProviderSession;
+  readonly revokeMcpCredential?: typeof McpSessionRegistry.revokeActiveMcpThread;
 }
 
 interface TurnAnalyticsMetadata {
@@ -484,6 +487,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
   const issueMcpCredential =
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
+  const recoverMcpCredential =
+    options?.recoverMcpCredential ?? McpSessionRegistry.recoverActiveMcpProviderSession;
+  const revokeMcpCredential =
+    options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -874,32 +881,43 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         (entry) => entry.enableAgentBrowserAccess !== undefined,
       );
       const deviceOverridden = entries.some((entry) => entry.enableAgentDeviceAccess !== undefined);
+      const heartbeatOverridden = entries.some(
+        (entry) => entry.enableHeartbeatAccess !== undefined,
+      );
       const environment = {
         browser: settings.enableAgentBrowserAccess,
         device: settings.enableAgentDeviceAccess,
+        heartbeat: settings.enableHeartbeatAccess,
       };
-      if (!browserOverridden && !deviceOverridden) return environment;
       // Provider-only runtimes may omit orchestration. An unresolved project
       // must not bypass an explicit project override, but a capability no
-      // project overrides keeps its environment value.
+      // project overrides keeps its environment value. Heartbeat always needs
+      // the persisted spawn metadata, so it fails closed without orchestration.
       const denied = {
         browser: browserOverridden ? false : environment.browser,
         device: deviceOverridden ? false : environment.device,
+        heartbeat: false,
       };
       if (Option.isNone(projectionQuery)) return denied;
       const thread = yield* projectionQuery.value.getThreadShellById(threadId);
       if (Option.isNone(thread)) return denied;
-      const resolved = resolveProjectSettings(settings, thread.value.projectId).settings;
+      const resolved =
+        browserOverridden || deviceOverridden || heartbeatOverridden
+          ? resolveProjectSettings(settings, thread.value.projectId).settings
+          : settings;
       return {
         browser: resolved.enableAgentBrowserAccess,
         device: resolved.enableAgentDeviceAccess,
+        heartbeat:
+          resolved.enableHeartbeatAccess &&
+          (thread.value.spawn === undefined || thread.value.spawn.allowOrchestration),
       };
     },
     Effect.catch((cause) =>
       Effect.logWarning(
-        "Could not read server settings; withholding agent browser and device access for this session.",
+        "Could not read server settings; withholding agent browser, device, and heartbeat access for this session.",
         { cause },
-      ).pipe(Effect.as({ browser: false, device: false })),
+      ).pipe(Effect.as({ browser: false, device: false, heartbeat: false })),
     ),
   );
 
@@ -910,6 +928,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const access = yield* agentAccessSettings(threadId);
     if (access.browser) capabilities.add("preview");
     if (access.device) capabilities.add("device");
+    if (access.heartbeat) capabilities.add("heartbeat");
     return capabilities;
   });
 
@@ -958,9 +977,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return credential;
     });
   const clearMcpSession = (threadId: ThreadId) =>
-    McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
+    revokeMcpCredential(threadId).pipe(
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
+  const recoverMcpSession = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+  ): Effect.Effect<boolean> => {
+    const session = McpProviderSession.readMcpProviderSession(threadId);
+    if (!session || session.providerInstanceId !== providerInstanceId) {
+      return Effect.succeed(false);
+    }
+    return recoverMcpCredential(session.providerSessionId);
+  };
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -1713,12 +1742,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.kind": routed.adapter.provider,
         ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
       });
-      // A turn is the clearest sign a session is still alive. The MCP
-      // credential is minted once at session start and cannot be rotated into
-      // an already-spawned agent process, so we keep the existing token valid
-      // rather than issuing a new one: sessions that go a long time between
-      // browser tool calls used to lose the toolkit outright.
-      yield* McpSessionRegistry.touchActiveMcpThread(input.threadId);
+      // Adapter routing just proved that this exact native session is alive.
+      // Recover its existing lease before the provider receives the turn: the
+      // bearer token is already fixed in the provider process, so rotating it
+      // or restarting the provider would discard provider-native tool state.
+      yield* recoverMcpSession(input.threadId, routed.instanceId);
       const analyticsModelSelection =
         input.modelSelection?.instanceId === routed.instanceId ? input.modelSelection : undefined;
       const turn = yield* Effect.acquireUseRelease(

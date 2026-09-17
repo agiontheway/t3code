@@ -15,6 +15,10 @@ import {
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 import {
+  isResultDeliveryPending,
+  type CrossProviderResultDeliveryState,
+} from "./crossProviderResultDelivery.ts";
+import {
   legacyLinkedPullRequestOf,
   legacyThreadPullRequestKey,
   normalizeThreadPullRequestKey,
@@ -30,6 +34,7 @@ import * as Predicate from "effect/Predicate";
 import type * as PlatformError from "effect/PlatformError";
 
 import {
+  HeartbeatThreadBusyError,
   OrchestrationCommandInvariantError,
   OrchestrationThreadSettleBlockedError,
   type OrchestrationCommandRejection,
@@ -136,6 +141,15 @@ function findPullRequestLink(
   return thread.pullRequests.find((link) => threadPullRequestKeysEqual(link, key));
 }
 
+function pendingCrossProviderResult(
+  heartbeatDeliveries: ReadonlyArray<CrossProviderResultDeliveryState>,
+): boolean {
+  // The durable delivery projection distinguishes failed requests from
+  // accepted future turns. Reconstructing this from capped activities makes a
+  // failed delivery look pending forever and can miss an accepted queued turn.
+  return heartbeatDeliveries.some(isResultDeliveryPending);
+}
+
 function withEventBase(
   input: Pick<OrchestrationCommand, "commandId"> & {
     readonly aggregateKind: OrchestrationEvent["aggregateKind"];
@@ -210,10 +224,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   command,
   readModel,
   userInputActivity,
+  heartbeatResultDeliveries = [],
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
   readonly userInputActivity?: OrchestrationThreadActivity;
+  readonly heartbeatResultDeliveries?: ReadonlyArray<CrossProviderResultDeliveryState>;
 }): Effect.fn.Return<
   DecideOrchestrationCommandResult,
   OrchestrationCommandRejection | PlatformError.PlatformError,
@@ -1809,6 +1825,122 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.heartbeat.due": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      if (thread.deletedAt !== null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "heartbeat cannot start a deleted thread",
+        });
+      }
+      // The persisted stop sequence is authoritative even after a later user
+      // turn: only a reservation scheduled after that stop may admit.
+      if (
+        thread.explicitStopSequence != null &&
+        command.scheduledAfterSequence < thread.explicitStopSequence
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "heartbeat cannot start after an explicit session stop",
+        });
+      }
+      // This is the serialized twin of the explicit-stop fence for a relative
+      // reservation that was admitted before its interrupt event reached the
+      // lifecycle subscriber. A wakeup armed after the interrupt still passes.
+      if (
+        command.jobKind === "relative" &&
+        thread.relativeInterruptSequence != null &&
+        command.scheduledAfterSequence < thread.relativeInterruptSequence
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "heartbeat relative wakeup cannot start after a turn interrupt",
+        });
+      }
+      // Snooze is presentation, not agent shutdown; an expired snooze must
+      // never hold a heartbeat forever.
+      const session = thread.session;
+      if (session?.status === "starting" || session?.status === "running") {
+        return yield* new HeartbeatThreadBusyError({
+          threadId: command.threadId,
+          jobId: command.jobId,
+          occurrenceId: command.occurrenceId,
+          detail: `provider session is ${session.status}`,
+        });
+      }
+      if (session?.activeTurnId != null) {
+        return yield* new HeartbeatThreadBusyError({
+          threadId: command.threadId,
+          jobId: command.jobId,
+          occurrenceId: command.occurrenceId,
+          detail: "an active provider turn is still outstanding",
+        });
+      }
+      if (
+        hasQueuedTurnStartForThread(thread, command.createdAt) ||
+        pendingCrossProviderResult(heartbeatResultDeliveries) ||
+        openRequests(thread).size > 0
+      ) {
+        return yield* new HeartbeatThreadBusyError({
+          threadId: command.threadId,
+          jobId: command.jobId,
+          occurrenceId: command.occurrenceId,
+          detail: "pending user, provider, approval, question, or child-result work is first",
+        });
+      }
+
+      const provenance = {
+        jobId: command.jobId,
+        occurrenceId: command.occurrenceId,
+        dueAt: command.dueAt,
+      };
+      const messageId = MessageId.make(`heartbeat:${command.occurrenceId}`);
+      const createdAt = command.createdAt;
+      const messageEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId,
+          role: "user",
+          text: command.prompt,
+          attachments: [],
+          turnId: null,
+          streaming: false,
+          heartbeat: provenance,
+          createdAt,
+          updatedAt: createdAt,
+        },
+      };
+      const turnStartEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          heartbeat: provenance,
+          createdAt,
+        },
+      };
+      return [messageEvent, turnStartEvent];
+    }
+
     case "thread.session.stop": {
       const thread = yield* requireThread({
         readModel,
@@ -1846,6 +1978,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.session-stop-requested",
         payload: {
           threadId: command.threadId,
+          ...(command.onlyIfSettled === true ? { onlyIfSettled: true } : {}),
           createdAt: command.createdAt,
         },
       };

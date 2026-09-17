@@ -38,6 +38,7 @@ const assertCurrentSchema = Effect.gen(function* () {
   ]);
   assert.deepStrictEqual(yield* sql`SELECT migration_id, name FROM t3_fork_migrations`, [
     { migration_id: 1, name: "ProjectionThreadsSpawn" },
+    { migration_id: 2, name: "HeartbeatJobs" },
   ]);
   const threads = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
   assert.ok(threads.some((column) => column.name === "spawn_json"));

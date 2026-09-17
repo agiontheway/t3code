@@ -7,8 +7,9 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 
-export type McpCapability = "preview" | "device" | "pull-requests";
+export type McpCapability = "preview" | "device" | "pull-requests" | "heartbeat";
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
@@ -53,3 +54,13 @@ export const requireMcpCapability = <const C extends McpCapability>(
       : // The conditional type narrows what the literal argument decided at runtime.
         Effect.fail(missingCapability(invocation, capability) as McpCapabilityError<C>),
   ).pipe(Effect.withSpan("mcp.requireCapability"));
+
+/** Used by synchronous MCP discovery predicates, which run on the authenticated request fiber. */
+export const currentMcpInvocationHasCapability = (capability: McpCapability): boolean => {
+  const fiber = Fiber.getCurrent();
+  if (fiber === undefined) return false;
+  return (
+    Context.getOrUndefined(fiber.context, McpInvocationContext)?.capabilities.has(capability) ===
+    true
+  );
+};
