@@ -77,6 +77,9 @@ import * as GitManager from "./git/GitManager.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as HeartbeatRepository from "./heartbeat/HeartbeatRepository.ts";
+import * as HeartbeatService from "./heartbeat/HeartbeatService.ts";
+import * as HeartbeatReactor from "./heartbeat/HeartbeatReactor.ts";
 import { CrossProviderAgentLive } from "./orchestration/Layers/CrossProviderAgent.ts";
 import { OrchestrationReactorLive } from "./orchestration/Layers/OrchestrationReactor.ts";
 import { RuntimeReceiptBusLive } from "./orchestration/Layers/RuntimeReceiptBus.ts";
@@ -242,6 +245,10 @@ const HttpServerLive = Layer.unwrap(
 
 const PlatformServicesLive = NodeServices.layer;
 
+// One shared HeartbeatService instance for the scheduler reactor, admission
+// reactor, provider command outcomes, and MCP heartbeat toolkit.
+const HeartbeatServiceLive = HeartbeatService.layer.pipe(Layer.provide(HeartbeatRepository.layer));
+
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
@@ -257,6 +264,8 @@ const ReactorLayerLive = Layer.empty.pipe(
   // orchestration layers so the dependency direction stays one-way.
   Layer.provideMerge(CrossProviderAgentLive),
   Layer.provideMerge(RuntimeReceiptBusLive),
+  Layer.provideMerge(HeartbeatReactor.layer),
+  Layer.provideMerge(HeartbeatServiceLive),
 );
 
 const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(

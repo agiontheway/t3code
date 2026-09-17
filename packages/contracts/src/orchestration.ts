@@ -791,6 +791,16 @@ export const OrchestrationThread = Schema.Struct({
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
   titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
+  // Serialized read-model fence for explicit stop cancellation. It closes the
+  // race where idle heartbeat admission follows the stop command before the
+  // asynchronous heartbeat-cancellation subscriber catches up.
+  explicitStopAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  explicitStopSequence: Schema.optional(Schema.NullOr(NonNegativeInt)),
+  // Relative slots are process-local. Admission compares this event sequence
+  // with the orchestration head captured at arm time, so clock skew and a
+  // lagging lifecycle subscriber cannot reopen an interrupted arm.
+  relativeInterruptAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  relativeInterruptSequence: Schema.optional(Schema.NullOr(NonNegativeInt)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -1252,6 +1262,13 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
+export const ThreadHeartbeatProvenance = Schema.Struct({
+  jobId: TrimmedNonEmptyString,
+  occurrenceId: TrimmedNonEmptyString,
+  dueAt: IsoDateTime,
+});
+export type ThreadHeartbeatProvenance = typeof ThreadHeartbeatProvenance.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
@@ -1284,6 +1301,8 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     text: Schema.String,
     attachments: Schema.Array(Schema.Union([UploadChatAttachment, ChatAttachment])),
     context: Schema.optional(OrchestrationMessageContext),
+    // Explicitly forbidden at the client boundary; provenance is server-owned.
+    heartbeat: Schema.optional(Schema.Never),
   }),
   modelSelection: Schema.optional(ModelSelection),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
@@ -1291,6 +1310,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   bootstrap: Schema.optional(ThreadTurnStartBootstrap),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  heartbeat: Schema.optional(Schema.Never),
   createdAt: IsoDateTime,
 });
 
@@ -1575,6 +1595,29 @@ const ThreadNativeAnswerRecordCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+// Only server-side heartbeat reactors dispatch this command. Keeping it out of
+// both client command unions is what makes the idle-admission provenance
+// unforgeable while still running through the serialized orchestration engine.
+const ThreadHeartbeatDueCommandBase = {
+  type: Schema.Literal("thread.heartbeat.due"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  jobId: TrimmedNonEmptyString,
+  occurrenceId: TrimmedNonEmptyString,
+  reservedAt: IsoDateTime,
+  scheduledAfterSequence: NonNegativeInt,
+  prompt: Schema.String,
+  dueAt: IsoDateTime,
+  createdAt: IsoDateTime,
+} as const;
+const ThreadHeartbeatDueCommand = Schema.Union([
+  Schema.Struct({ ...ThreadHeartbeatDueCommandBase, jobKind: Schema.Literal("cron") }),
+  Schema.Struct({
+    ...ThreadHeartbeatDueCommandBase,
+    jobKind: Schema.Literal("relative"),
+  }),
+]);
+
 const ThreadPullRequestLinkSyncCommand = Schema.Struct({
   type: Schema.Literal("thread.pull-request-link.sync"),
   commandId: CommandId,
@@ -1603,6 +1646,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadTitleRefineCommand,
   ThreadPullRequestSyncCommand,
   ThreadPullRequestLinkSyncCommand,
+  ThreadHeartbeatDueCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1836,6 +1880,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
   context: Schema.optional(OrchestrationMessageContext),
   turnId: Schema.NullOr(TurnId),
   streaming: Schema.Boolean,
+  heartbeat: Schema.optional(ThreadHeartbeatProvenance),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1850,6 +1895,7 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  heartbeat: Schema.optional(ThreadHeartbeatProvenance),
   createdAt: IsoDateTime,
 });
 
@@ -1888,6 +1934,8 @@ export const ThreadRevertedPayload = Schema.Struct({
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
   threadId: ThreadId,
+  /** Preserved from the command so automatic settle cleanup is not mistaken for a user stop. */
+  onlyIfSettled: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 

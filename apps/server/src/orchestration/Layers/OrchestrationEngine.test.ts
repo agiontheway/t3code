@@ -20,6 +20,7 @@ import {
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Metric from "effect/Metric";
@@ -566,6 +567,369 @@ describe("OrchestrationEngine", () => {
       });
       expect(yield* engine.latestSequence).toBe(sequence);
     }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
+  effectIt.effect(
+    "retries a heartbeat occurrence after a transient busy decision and deduplicates accepted replay",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const receipts = yield* OrchestrationCommandReceipts.OrchestrationCommandReceiptRepository;
+        const projectId = ProjectId.make("project-heartbeat-busy");
+        const threadId = ThreadId.make("thread-heartbeat-busy");
+        const commandId = CommandId.make("server:heartbeat:occurrence-1");
+        const createdAt = now();
+
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-heartbeat-project"),
+          projectId,
+          title: "Project",
+          workspaceRoot: "/tmp/project-heartbeat-busy",
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-heartbeat-thread"),
+          threadId,
+          projectId,
+          title: "Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-heartbeat-running"),
+          threadId,
+          createdAt,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+        });
+
+        const heartbeat = {
+          type: "thread.heartbeat.due",
+          commandId,
+          threadId,
+          jobId: "aaaaaaaa",
+          occurrenceId: "occurrence-1",
+          jobKind: "relative",
+          reservedAt: createdAt,
+          scheduledAfterSequence: 0,
+          prompt: "resume the schedule",
+          dueAt: createdAt,
+          createdAt,
+        } satisfies OrchestrationCommand;
+        const beforeBusy = yield* engine.latestSequence;
+        const busy = yield* engine.dispatch(heartbeat).pipe(Effect.flip);
+        expect(busy).toMatchObject({
+          _tag: "HeartbeatThreadBusyError",
+          threadId,
+          occurrenceId: "occurrence-1",
+        });
+        expect(Option.getOrNull(yield* receipts.getByCommandId({ commandId }))).toBeNull();
+        expect(yield* engine.latestSequence).toBe(beforeBusy);
+
+        yield* engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-heartbeat-stopped"),
+          threadId,
+          createdAt,
+          session: {
+            threadId,
+            status: "stopped",
+            providerName: "codex",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+        });
+
+        const admitted = yield* engine.dispatch(heartbeat);
+        const acceptedReceipt = Option.getOrThrow(yield* receipts.getByCommandId({ commandId }));
+        expect(acceptedReceipt).toMatchObject({
+          commandId,
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          status: "accepted",
+          resultSequence: admitted.sequence,
+        });
+        expect(yield* engine.dispatch(heartbeat)).toEqual(admitted);
+
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const detail = yield* snapshots.getThreadDetailById(threadId);
+        const detailValue = Option.getOrThrow(detail);
+        expect(
+          detailValue.messages.filter((message) => message.text === "resume the schedule"),
+        ).toHaveLength(1);
+      }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
+  effectIt.effect(
+    "rejects a relative heartbeat reservation raced by an accepted turn interrupt",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const receipts = yield* OrchestrationCommandReceipts.OrchestrationCommandReceiptRepository;
+        const projectId = ProjectId.make("project-heartbeat-interrupt-race");
+        const threadId = ThreadId.make("thread-heartbeat-interrupt-race");
+        const createdAt = now();
+
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-heartbeat-interrupt-project"),
+          projectId,
+          title: "Project",
+          workspaceRoot: "/tmp/project-heartbeat-interrupt-race",
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-heartbeat-interrupt-thread"),
+          threadId,
+          projectId,
+          title: "Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("cmd-heartbeat-interrupt"),
+          threadId,
+          createdAt,
+        });
+
+        const staleHeartbeat = {
+          type: "thread.heartbeat.due",
+          commandId: CommandId.make("server:heartbeat:interrupt-stale-occurrence"),
+          threadId,
+          jobId: "cccccccc",
+          occurrenceId: "interrupt-stale-occurrence",
+          jobKind: "relative",
+          // The arm predates the interrupt, but reservation happens afterward
+          // while the asynchronous lifecycle subscriber is deliberately absent.
+          reservedAt: "2026-01-01T00:00:00.500Z",
+          scheduledAfterSequence: 2,
+          prompt: "must not run",
+          dueAt: createdAt,
+          createdAt: now(),
+        } satisfies OrchestrationCommand;
+        const error = yield* engine.dispatch(staleHeartbeat).pipe(Effect.flip);
+        expect(error).toMatchObject({
+          _tag: "OrchestrationCommandInvariantError",
+          detail: "heartbeat relative wakeup cannot start after a turn interrupt",
+        });
+        expect(
+          Option.getOrThrow(
+            yield* receipts.getByCommandId({ commandId: staleHeartbeat.commandId }),
+          ),
+        ).toMatchObject({ status: "rejected" });
+
+        const armedAfterInterrupt = "2026-01-01T00:00:01.000Z";
+        yield* engine.dispatch({
+          ...staleHeartbeat,
+          commandId: CommandId.make("server:heartbeat:interrupt-new-occurrence"),
+          occurrenceId: "interrupt-new-occurrence",
+          reservedAt: armedAfterInterrupt,
+          scheduledAfterSequence: 3,
+          prompt: "wake after rearm",
+          createdAt: armedAfterInterrupt,
+        } satisfies OrchestrationCommand);
+        const events = yield* engine
+          .readThreadEvents({
+            threadId,
+            fromSequenceExclusive: 0,
+            toSequenceInclusive: yield* engine.latestSequence,
+          })
+          .pipe(Stream.runCollect);
+        const turnStarts = Array.from(events).filter(
+          (event) => event.type === "thread.turn-start-requested",
+        );
+        expect(
+          turnStarts.filter(
+            (event) =>
+              event.type === "thread.turn-start-requested" &&
+              event.payload.heartbeat?.occurrenceId === "interrupt-new-occurrence",
+          ),
+        ).toHaveLength(1);
+      }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
+  effectIt.effect("blocks stale heartbeat admission after a serialized explicit session stop", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const receipts = yield* OrchestrationCommandReceipts.OrchestrationCommandReceiptRepository;
+      const projectId = ProjectId.make("project-heartbeat-stop-race");
+      const threadId = ThreadId.make("thread-heartbeat-stop-race");
+      const createdAt = now();
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-heartbeat-stop-project"),
+        projectId,
+        title: "Project",
+        workspaceRoot: "/tmp/project-heartbeat-stop-race",
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-heartbeat-stop-thread"),
+        threadId,
+        projectId,
+        title: "Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      });
+      yield* engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-heartbeat-explicit-stop"),
+        threadId,
+        createdAt,
+      });
+
+      const heartbeat = {
+        type: "thread.heartbeat.due",
+        commandId: CommandId.make("server:heartbeat:stop-race-occurrence"),
+        threadId,
+        jobId: "bbbbbbbb",
+        occurrenceId: "stop-race-occurrence",
+        jobKind: "cron",
+        reservedAt: createdAt,
+        scheduledAfterSequence: 2,
+        prompt: "must not run",
+        dueAt: createdAt,
+        createdAt,
+      } satisfies OrchestrationCommand;
+      const error = yield* engine.dispatch(heartbeat).pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "OrchestrationCommandInvariantError",
+        detail: "heartbeat cannot start after an explicit session stop",
+      });
+      expect(
+        Option.getOrThrow(yield* receipts.getByCommandId({ commandId: heartbeat.commandId })),
+      ).toMatchObject({ status: "rejected" });
+
+      // The public shell projection deliberately omits the internal fence;
+      // the command's rejection proves the serialized stop was observed.
+    }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
+  effectIt.effect(
+    "keeps the stop-sequence fence across an ordinary user turn after an explicit stop",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const projectId = ProjectId.make("project-heartbeat-stop-sequence");
+        const threadId = ThreadId.make("thread-heartbeat-stop-sequence");
+        const createdAt = now();
+        const idleAt = DateTime.formatIso(DateTime.makeUnsafe(Date.parse(createdAt) + 5 * 60_000));
+
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-heartbeat-stop-seq-project"),
+          projectId,
+          title: "Project",
+          workspaceRoot: "/tmp/project-heartbeat-stop-sequence",
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-heartbeat-stop-seq-thread"),
+          threadId,
+          projectId,
+          title: "Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+        yield* engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-heartbeat-stop-seq-stop"),
+          threadId,
+          createdAt,
+        });
+        // An ordinary human turn after the stop must not erase the fence.
+        yield* engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-heartbeat-stop-seq-user-turn"),
+          threadId,
+          message: {
+            messageId: MessageId.make("message-heartbeat-stop-seq-user-turn"),
+            role: "user",
+            text: "continue after stop",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          createdAt,
+        });
+
+        const staleHeartbeat = {
+          type: "thread.heartbeat.due",
+          commandId: CommandId.make("server:heartbeat:stop-seq-stale-occurrence"),
+          threadId,
+          jobId: "cccccccc",
+          occurrenceId: "stop-seq-stale-occurrence",
+          jobKind: "cron",
+          reservedAt: createdAt,
+          // Reserved before the accepted stop, admitted after the user turn.
+          scheduledAfterSequence: 0,
+          prompt: "stale reservation",
+          dueAt: idleAt,
+          createdAt: idleAt,
+        } satisfies OrchestrationCommand;
+        const staleError = yield* engine.dispatch(staleHeartbeat).pipe(Effect.flip);
+        expect(staleError).toMatchObject({
+          _tag: "OrchestrationCommandInvariantError",
+          detail: "heartbeat cannot start after an explicit session stop",
+        });
+
+        const freshHeartbeat = {
+          ...staleHeartbeat,
+          commandId: CommandId.make("server:heartbeat:stop-seq-fresh-occurrence"),
+          occurrenceId: "stop-seq-fresh-occurrence",
+          // Armed after the stop and the user turn, so the fence passes.
+          scheduledAfterSequence: 1000,
+          prompt: "fresh reservation",
+          dueAt: idleAt,
+          createdAt: idleAt,
+        } satisfies OrchestrationCommand;
+        yield* engine.dispatch(freshHeartbeat);
+      }).pipe(Effect.provide(makeOrchestrationLayer())),
   );
 
   effectIt.effect(

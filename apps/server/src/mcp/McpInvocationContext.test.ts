@@ -63,3 +63,27 @@ it.effect("reports other missing capabilities with the neutral error", () => {
     expect(scope).toBe(invocation);
   });
 });
+
+it.effect("treats heartbeat as an independent capability", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-1"),
+    providerSessionId: "provider-session-1",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    capabilities: new Set(["heartbeat"]),
+    issuedAt: 1,
+  };
+
+  return Effect.gen(function* () {
+    const scope = yield* McpInvocationContext.requireMcpCapability("heartbeat").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+    );
+    expect(scope).toBe(invocation);
+
+    const error = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.flip,
+    );
+    expect(error).toBeInstanceOf(PreviewAutomationUnavailableError);
+  });
+});

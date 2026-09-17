@@ -52,8 +52,23 @@ export class OrchestrationThreadSettleBlockedError extends Schema.TaggedError<Or
   }
 }
 
+export class HeartbeatThreadBusyError extends Schema.TaggedError<HeartbeatThreadBusyError>()(
+  "HeartbeatThreadBusyError",
+  {
+    threadId: ThreadId,
+    jobId: Schema.String,
+    occurrenceId: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Heartbeat ${this.jobId} is waiting for thread ${this.threadId} to become idle: ${this.detail}`;
+  }
+}
+
 export const OrchestrationCommandRejection = Schema.Union([
   OrchestrationCommandInvariantError,
+  HeartbeatThreadBusyError,
   OrchestrationThreadSettleBlockedError,
 ]);
 export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;

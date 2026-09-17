@@ -56,6 +56,9 @@ import { OrchestrationProjectionSnapshotQueryLive } from "../src/orchestration/L
 import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts";
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
+import * as HeartbeatReactor from "../src/heartbeat/HeartbeatReactor.ts";
+import * as HeartbeatService from "../src/heartbeat/HeartbeatService.ts";
+import * as HeartbeatRepository from "../src/heartbeat/HeartbeatRepository.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
 import { ProviderCommandReactorLive } from "../src/orchestration/Layers/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionLive } from "../src/orchestration/Layers/ProviderRuntimeIngestion.ts";
@@ -384,6 +387,8 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(VcsProcess.layer),
     );
     const orchestrationReactorLayer = OrchestrationReactorLive.pipe(
+      Layer.provideMerge(HeartbeatReactor.layer),
+      Layer.provideMerge(HeartbeatService.layer.pipe(Layer.provide(HeartbeatRepository.layer))),
       Layer.provideMerge(runtimeIngestionLayer),
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),

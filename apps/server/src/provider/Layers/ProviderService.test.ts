@@ -78,6 +78,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
@@ -4936,20 +4937,117 @@ boundedListing.layer("ProviderServiceLive session listing", (it) => {
   );
 });
 
+it.effect(
+  "recovers a retained heartbeat credential on the next turn without recycling the provider",
+  () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-retained-heartbeat-credential");
+      const providerSessionId = "mcp-provider-session-retained";
+      const codex = makeFakeCodexAdapter();
+      const recovered: string[] = [];
+      const revoked: ThreadId[] = [];
+      const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const providerLayer = makeProviderServiceLive({
+        issueMcpCredential: (request) =>
+          Effect.succeed({
+            config: {
+              environmentId: EnvironmentId.make("environment-retained-heartbeat"),
+              threadId: request.threadId,
+              providerSessionId,
+              providerInstanceId: request.providerInstanceId,
+              endpoint: "http://127.0.0.1:43123/mcp",
+              authorizationHeader: "Bearer retained-heartbeat-token",
+              capabilities: new Set(["heartbeat", ...request.capabilities]),
+            },
+          }),
+        recoverMcpCredential: (candidate) =>
+          Effect.sync(() => {
+            recovered.push(candidate);
+            return candidate === providerSessionId;
+          }),
+        revokeMcpCredential: (candidate) =>
+          Effect.sync(() => {
+            revoked.push(candidate);
+          }),
+      }).pipe(
+        Layer.provide(
+          Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistry,
+            makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter }),
+          ),
+        ),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        codex.startSession.mockClear();
+        codex.stopSession.mockClear();
+
+        yield* provider.sendTurn({ threadId, input: "scheduled heartbeat" });
+
+        assert.deepEqual(recovered, [providerSessionId]);
+        assert.equal(codex.startSession.mock.calls.length, 0);
+        assert.equal(codex.stopSession.mock.calls.length, 0);
+        assert.equal(codex.sendTurn.mock.calls.length, 1);
+        const retained = McpProviderSession.readMcpProviderSession(threadId);
+        assert.equal(retained?.authorizationHeader, "Bearer retained-heartbeat-token");
+        assert.equal(retained?.capabilities.has("heartbeat"), true);
+
+        yield* provider.stopSession({ threadId });
+        assert.deepEqual(revoked, [threadId]);
+        assert.equal(codex.stopSession.mock.calls.length, 1);
+        assert.equal(McpProviderSession.readMcpProviderSession(threadId), undefined);
+      }).pipe(Effect.provide(providerLayer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 const decodeBrowserAccessThreadShell = Schema.decodeUnknownEffect(OrchestrationThreadShell);
 
-describe("agent browser access", () => {
+describe("agent MCP access", () => {
   const projectId = ProjectId.make("project-browser-access");
 
   const startSessionWith = (
-    access: boolean | { readonly browser: boolean; readonly device: boolean },
+    access:
+      | boolean
+      | { readonly browser: boolean; readonly device: boolean; readonly heartbeat?: boolean },
     threadId: ThreadId,
-    projectOverride?: boolean | { readonly browser?: boolean; readonly device?: boolean },
-    options?: { readonly withoutOrchestration?: boolean },
+    projectOverride?:
+      | boolean
+      | {
+          readonly browser?: boolean;
+          readonly device?: boolean;
+          readonly heartbeat?: boolean;
+        },
+    options?: {
+      readonly withoutOrchestration?: boolean;
+      readonly spawn?: { readonly allowOrchestration: boolean };
+    },
   ) =>
     Effect.gen(function* () {
       const enableAgentBrowserAccess = typeof access === "boolean" ? access : access.browser;
       const enableAgentDeviceAccess = typeof access === "boolean" ? access : access.device;
+      const enableHeartbeatAccess = typeof access === "boolean" ? false : access.heartbeat === true;
       const issued: Array<{ threadId: ThreadId; capabilities: ReadonlyArray<string> }> = [];
       const codex = makeFakeCodexAdapter();
       const providerAdapterLayer = Layer.succeed(
@@ -4995,6 +5093,16 @@ describe("agent browser access", () => {
                 runtimeMode: "full-access",
                 branch: null,
                 worktreePath: null,
+                ...(options?.spawn
+                  ? {
+                      spawn: {
+                        parentThreadId: "thread-parent",
+                        allowOrchestration: options.spawn.allowOrchestration,
+                        depth: 1,
+                        taskId: `xp-agent:${threadId}`,
+                      },
+                    }
+                  : {}),
                 latestTurn: null,
                 createdAt: "2026-01-01T00:00:00.000Z",
                 updatedAt: "2026-01-01T00:00:00.000Z",
@@ -5027,6 +5135,7 @@ describe("agent browser access", () => {
           ServerSettings.ServerSettingsService.layerTest({
             enableAgentBrowserAccess,
             enableAgentDeviceAccess,
+            enableHeartbeatAccess,
             projectSettingsOverrides:
               projectOverride === undefined
                 ? {}
@@ -5039,6 +5148,9 @@ describe("agent browser access", () => {
                           : {}),
                         ...(projectOverride.device !== undefined
                           ? { enableAgentDeviceAccess: projectOverride.device }
+                          : {}),
+                        ...(projectOverride.heartbeat !== undefined
+                          ? { enableHeartbeatAccess: projectOverride.heartbeat }
                           : {}),
                       },
                     },
@@ -5148,6 +5260,65 @@ describe("agent browser access", () => {
         { withoutOrchestration: true },
       );
       assert.deepEqual(issued, [{ threadId, capabilities: ["preview", "pull-requests"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("grants heartbeat to a top-level thread independently of browser and device", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-heartbeat-top-level");
+      const issued = yield* startSessionWith(
+        { browser: false, device: false, heartbeat: true },
+        threadId,
+      );
+      assert.deepEqual(issued, [{ threadId, capabilities: ["heartbeat", "pull-requests"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("grants heartbeat to an orchestration-enabled child", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-heartbeat-orchestrator-child");
+      const issued = yield* startSessionWith(
+        { browser: false, device: false, heartbeat: true },
+        threadId,
+        undefined,
+        { spawn: { allowOrchestration: true } },
+      );
+      assert.deepEqual(issued, [{ threadId, capabilities: ["heartbeat", "pull-requests"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("withholds heartbeat from a leaf child even when the environment enables it", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-heartbeat-leaf-child");
+      const issued = yield* startSessionWith(
+        { browser: false, device: false, heartbeat: true },
+        threadId,
+        undefined,
+        { spawn: { allowOrchestration: false } },
+      );
+      assert.deepEqual(issued, [{ threadId, capabilities: ["pull-requests"] }]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("honors project heartbeat overrides in both directions", () =>
+    Effect.gen(function* () {
+      const deniedThreadId = asThreadId("thread-project-heartbeat-off");
+      const denied = yield* startSessionWith(
+        { browser: false, device: false, heartbeat: true },
+        deniedThreadId,
+        { heartbeat: false },
+      );
+      assert.deepEqual(denied, [{ threadId: deniedThreadId, capabilities: ["pull-requests"] }]);
+
+      const grantedThreadId = asThreadId("thread-project-heartbeat-on");
+      const granted = yield* startSessionWith(
+        { browser: false, device: false, heartbeat: false },
+        grantedThreadId,
+        { heartbeat: true },
+      );
+      assert.deepEqual(granted, [
+        { threadId: grantedThreadId, capabilities: ["heartbeat", "pull-requests"] },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

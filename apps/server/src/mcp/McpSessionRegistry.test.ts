@@ -84,6 +84,30 @@ it.effect("always grants pull-requests and gates browser and device access indep
   }),
 );
 
+it.effect("replaces a prior lease for the same thread when issuing a new one", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-replacement");
+    const first = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(),
+    });
+    const firstToken = first.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect(yield* registry.resolve(firstToken)).toBeDefined();
+
+    const second = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(),
+    });
+    const secondToken = second.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    expect(yield* registry.resolve(firstToken)).toBeUndefined();
+    const resolvedSecond = yield* registry.resolve(secondToken);
+    expect(resolvedSecond?.threadId).toBe(threadId);
+  }),
+);
+
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
     const cases = [
@@ -140,6 +164,57 @@ it.effect("keeps a credential alive across turns that never touch an MCP tool", 
     }
 
     expect((yield* registry.resolve(token))?.threadId).toBe(threadId);
+  }),
+);
+
+it.effect("recovers a retained provider credential after more than 24 hours idle", () =>
+  Effect.gen(function* () {
+    let timestamp = 1_000;
+    const oneDayMs = 24 * 60 * 60 * 1_000;
+    const registry = yield* McpSessionRegistry.__testing
+      .make({ now: () => timestamp, livenessWindowMs: oneDayMs })
+      .pipe(
+        Effect.provideService(HttpServer.HttpServer, fakeHttpServer),
+        Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+        Effect.provide(NodeServices.layer),
+      );
+    const threadId = ThreadId.make("thread-heartbeat-idle");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["heartbeat"]),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const providerSessionId = issued.config.providerSessionId;
+
+    timestamp += oneDayMs + 1;
+    expect(yield* registry.resolve(token)).toBeUndefined();
+    expect(yield* registry.recoverProviderSession(providerSessionId)).toBe(true);
+    const renewed = yield* registry.resolve(token);
+    expect(renewed?.threadId).toBe(threadId);
+    expect(renewed?.providerSessionId).toBe(providerSessionId);
+    expect([...(renewed?.capabilities ?? [])]).toContain("heartbeat");
+  }),
+);
+
+it.effect("cannot recover a revoked or unknown native provider session", () =>
+  Effect.gen(function* () {
+    let timestamp = 1_000;
+    const registry = yield* makeRegistry(() => timestamp);
+    const threadId = ThreadId.make("thread-heartbeat-revoked");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      capabilities: new Set(["heartbeat"]),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const providerSessionId = issued.config.providerSessionId;
+
+    yield* registry.revokeProviderSession(providerSessionId);
+    timestamp += 101;
+    expect(yield* registry.recoverProviderSession(providerSessionId)).toBe(false);
+    expect(yield* registry.recoverProviderSession("unknown-provider-session")).toBe(false);
+    expect(yield* registry.resolve(token)).toBeUndefined();
   }),
 );
 

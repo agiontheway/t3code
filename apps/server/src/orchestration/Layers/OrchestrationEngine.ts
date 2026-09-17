@@ -40,6 +40,7 @@ import {
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
+import { HeartbeatThreadBusyError } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
@@ -53,6 +54,7 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
   OrchestrationCommandPreviouslyRejectedError,
 );
 const isOrchestrationCommandIdConflictError = Schema.is(OrchestrationCommandIdConflictError);
+const isHeartbeatThreadBusyError = Schema.is(HeartbeatThreadBusyError);
 
 interface CommandEnvelope {
   command: OrchestrationCommand;
@@ -242,9 +244,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.type === "thread.user-input.dismiss"
             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
             : Option.none();
+        // The command read model intentionally caps activities while running,
+        // so the authoritative child-result projection is the source for
+        // accepted-but-unfinished queued turns and completed/failed states.
+        const heartbeatResultDeliveries =
+          envelope.command.type === "thread.heartbeat.due"
+            ? yield* projectionSnapshotQuery.getCrossProviderResultDeliveries(
+                envelope.command.threadId,
+              )
+            : [];
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
+          heartbeatResultDeliveries,
           ...(Option.isSome(userInputActivity)
             ? { userInputActivity: userInputActivity.value }
             : {}),
@@ -389,7 +401,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               ),
             );
 
-            if (isOrchestrationCommandRejection(error)) {
+            // Heartbeat busy is admission scheduling, not a command semantic
+            // verdict. Its stable occurrence command stays retryable; a later
+            // replay of the same command is still idempotent if it was accepted.
+            if (isOrchestrationCommandRejection(error) && !isHeartbeatThreadBusyError(error)) {
               yield* commandReceiptRepository
                 .upsert({
                   commandId: envelope.command.commandId,

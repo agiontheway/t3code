@@ -996,6 +996,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "defaultProjectScripts",
   "enableAgentBrowserAccess",
   "enableAgentDeviceAccess",
+  "enableHeartbeatAccess",
   "textGenerationModelSelection",
   "sourceControlWriterModelSelection",
   "sourceControlWritingStyle",
@@ -1021,6 +1022,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
+  enableHeartbeatAccess: Schema.optionalKey(Schema.Boolean),
   textGenerationModelSelection: Schema.optionalKey(ModelSelection),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   sourceControlWritingStyle: Schema.optionalKey(SourceControlWritingStyleSettings),
@@ -1120,6 +1122,12 @@ export const ServerSettings = Schema.Struct({
    * unaffected.
    */
   enableAgentDeviceAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Whether agents may schedule thread heartbeats. Separate from browser and
+   * device access so self-scheduling can be disabled without revoking unrelated
+   * toolkits.
+   */
+  enableHeartbeatAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /**
    * Whether this server may install and run T3's device helper processes.
    * Kept separate from agent access so enabling the user's Device panel does
@@ -1398,6 +1406,7 @@ export const ServerSettingsPatch = Schema.Struct({
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
+  enableHeartbeatAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
   ),

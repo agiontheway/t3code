@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
+import * as HeartbeatAdmissionReactor from "../../heartbeat/HeartbeatAdmissionReactor.ts";
 import {
   OrchestrationReactor,
   type OrchestrationReactorShape,
@@ -23,8 +24,10 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const pullRequestSyncReactor = yield* PullRequestSyncReactor.PullRequestSyncReactor;
   const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
+  const heartbeatAdmissionReactor = yield* HeartbeatAdmissionReactor.HeartbeatAdmissionReactor;
 
   const start: OrchestrationReactorShape["start"] = Effect.fn("start")(function* () {
+    yield* heartbeatAdmissionReactor.start();
     yield* providerRuntimeIngestion.start();
     yield* providerCommandReactor.start();
     yield* checkpointReactor.start();
@@ -43,4 +46,4 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
 export const OrchestrationReactorLive = Layer.effect(
   OrchestrationReactor,
   makeOrchestrationReactor,
-);
+).pipe(Layer.provide(HeartbeatAdmissionReactor.layer));

@@ -54,6 +54,7 @@ import {
   ProviderService,
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
+import { HeartbeatScheduler } from "../../heartbeat/HeartbeatService.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
@@ -203,6 +204,9 @@ describe("ProviderCommandReactor", () => {
     const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
     const tryHandlePromptCommand = vi.fn<ProviderAuthService["Service"]["tryHandlePromptCommand"]>(
       input?.tryHandlePromptCommandEffect ?? (() => Effect.succeed(false)),
+    );
+    const heartbeatSetOutcome = vi.fn<HeartbeatScheduler["Service"]["setOccurrenceOutcome"]>(
+      () => Effect.void,
     );
     let nextSessionIndex = 1;
     const runtimeSessions: Array<ProviderSession> = [];
@@ -511,6 +515,7 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
+      Layer.provide(Layer.mock(HeartbeatScheduler)({ setOccurrenceOutcome: heartbeatSetOutcome })),
       Layer.provideMerge(ServerSettingsService.layerTest()),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -651,6 +656,7 @@ describe("ProviderCommandReactor", () => {
     return {
       engine,
       snapshotQuery,
+      heartbeatSetOutcome,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readPendingTurnStarts: () =>
         runtime!.runPromise(
@@ -1328,6 +1334,97 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  effectIt.effect("records a heartbeat sent outcome after the provider accepts the turn", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+
+      yield* harness.engine.dispatch({
+        type: "thread.heartbeat.due",
+        commandId: CommandId.make("cmd-heartbeat-due-sent"),
+        threadId: ThreadId.make("thread-1"),
+        jobKind: "cron",
+        jobId: "job-heartbeat-sent",
+        occurrenceId: "occ-heartbeat-sent",
+        scheduledAfterSequence: 0,
+        reservedAt: "2026-01-01T00:00:00.000Z",
+        prompt: "heartbeat check",
+        dueAt: "2026-01-01T00:00:00.000Z",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() =>
+        waitFor(() => harness.heartbeatSetOutcome.mock.calls.length === 1),
+      );
+      expect(harness.heartbeatSetOutcome.mock.calls[0]?.[0]).toBe("occ-heartbeat-sent");
+      expect(harness.heartbeatSetOutcome.mock.calls[0]?.[1]).toMatchObject({ status: "sent" });
+    }),
+  );
+
+  effectIt.effect("records a heartbeat failed outcome when the provider send fails", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          sendTurnEffect: () =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "turn.start",
+                detail: "native delivery rejected",
+              }),
+            ),
+        }),
+      );
+
+      yield* harness.engine.dispatch({
+        type: "thread.heartbeat.due",
+        commandId: CommandId.make("cmd-heartbeat-due-failed"),
+        threadId: ThreadId.make("thread-1"),
+        jobKind: "cron",
+        jobId: "job-heartbeat-failed",
+        occurrenceId: "occ-heartbeat-failed",
+        scheduledAfterSequence: 0,
+        reservedAt: "2026-01-01T00:00:00.000Z",
+        prompt: "heartbeat check",
+        dueAt: "2026-01-01T00:00:00.000Z",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() =>
+        waitFor(() => harness.heartbeatSetOutcome.mock.calls.length === 1),
+      );
+      expect(harness.heartbeatSetOutcome.mock.calls[0]?.[0]).toBe("occ-heartbeat-failed");
+      expect(harness.heartbeatSetOutcome.mock.calls[0]?.[1]).toMatchObject({
+        status: "failed",
+        error: expect.stringContaining("native delivery rejected"),
+      });
+    }),
+  );
+
+  effectIt.effect("does not record heartbeat outcomes for ordinary turns", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-ordinary"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-ordinary"),
+          role: "user",
+          text: "ordinary turn",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+      yield* Effect.promise(() => harness.drain());
+      expect(harness.heartbeatSetOutcome.mock.calls.length).toBe(0);
+    }),
+  );
 
   effectIt.effect("projects inline context before sending the provider turn", () =>
     Effect.gen(function* () {
