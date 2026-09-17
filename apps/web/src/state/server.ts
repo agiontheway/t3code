@@ -1,5 +1,4 @@
 import {
-  type CrossProviderAgentRoutes,
   DEFAULT_SERVER_SETTINGS,
   type EditorId,
   type EnvironmentTheme,
@@ -11,7 +10,7 @@ import {
 } from "@t3tools/contracts";
 import { createServerEnvironmentAtoms } from "@t3tools/client-runtime/state/server";
 import { createEnvironmentServerConfigsAtom } from "@t3tools/client-runtime/state/shell";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
+import { mergeWithDefaultKeybindings } from "@t3tools/shared/keybindings";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
@@ -91,28 +90,14 @@ export const primaryServerProvidersAtom = Atom.make(
     get(primaryServerConfigAtom)?.providers ?? EMPTY_SERVER_PROVIDERS,
 ).pipe(Atom.withLabel("web-primary-server-providers"));
 
-const EMPTY_CROSS_PROVIDER_ROUTE_DEFAULTS: CrossProviderAgentRoutes = {};
-
-/** Server-derived generated cross-provider routes; empty until a server that computes them answers. */
-export const primaryServerCrossProviderRouteDefaultsAtom = Atom.make(
-  (get): CrossProviderAgentRoutes =>
-    get(primaryServerConfigAtom)?.crossProviderAgentRouteDefaults ??
-    EMPTY_CROSS_PROVIDER_ROUTE_DEFAULTS,
-).pipe(Atom.withLabel("web-primary-server-cross-provider-route-defaults"));
-
-export const primaryServerKeybindingsAtom = Atom.make(
-  (get): ServerConfig["keybindings"] =>
-    get(primaryServerConfigAtom)?.keybindings ?? DEFAULT_RESOLVED_KEYBINDINGS,
+export const primaryServerKeybindingsAtom = Atom.make((get): ServerConfig["keybindings"] =>
+  mergeWithDefaultKeybindings(get(primaryServerConfigAtom)?.keybindings ?? []),
 ).pipe(Atom.withLabel("web-primary-server-keybindings"));
 
 export const primaryServerAvailableEditorsAtom = Atom.make(
   (get): ReadonlyArray<EditorId> =>
     get(primaryServerConfigAtom)?.availableEditors ?? EMPTY_AVAILABLE_EDITORS,
 ).pipe(Atom.withLabel("web-primary-server-available-editors"));
-
-export const primaryServerKeybindingsConfigPathAtom = Atom.make(
-  (get): string | null => get(primaryServerConfigAtom)?.keybindingsConfigPath ?? null,
-).pipe(Atom.withLabel("web-primary-server-keybindings-config-path"));
 
 const EMPTY_ENVIRONMENT_THEMES: ReadonlyArray<EnvironmentTheme> = [];
 
@@ -125,8 +110,3 @@ export const primaryServerEnvironmentThemesAtom = Atom.make(
   (get): ReadonlyArray<EnvironmentTheme> =>
     get(primaryServerConfigAtom)?.environmentThemes ?? EMPTY_ENVIRONMENT_THEMES,
 ).pipe(Atom.withLabel("web-primary-server-environment-themes"));
-
-export const primaryServerObservabilityAtom = Atom.make(
-  (get): ServerConfig["observability"] | null =>
-    get(primaryServerConfigAtom)?.observability ?? null,
-).pipe(Atom.withLabel("web-primary-server-observability"));
