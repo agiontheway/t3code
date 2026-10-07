@@ -9,9 +9,9 @@ import {
 
 describe("parseWslUncPath", () => {
   it("parses wsl.localhost UNC paths into distro and POSIX path", () => {
-    expect(parseWslUncPath("\\\\wsl.localhost\\Ubuntu-22.04\\home\\josh\\repo")).toEqual({
+    expect(parseWslUncPath("\\\\wsl.localhost\\Ubuntu-22.04\\home\\user\\repo")).toEqual({
       distro: "Ubuntu-22.04",
-      linuxPath: "/home/josh/repo",
+      linuxPath: "/home/user/repo",
     });
   });
 
@@ -23,7 +23,7 @@ describe("parseWslUncPath", () => {
   });
 
   it("rejects non-WSL paths and invalid distro names", () => {
-    expect(parseWslUncPath("C:\\Users\\Josh\\repo")).toBeNull();
+    expect(parseWslUncPath("C:\\Users\\User\\repo")).toBeNull();
     expect(parseWslUncPath("\\\\wsl.localhost\\bad!name\\home")).toBeNull();
   });
 });

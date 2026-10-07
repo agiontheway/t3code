@@ -78,17 +78,17 @@ describe("parseWslDistroList", () => {
 
 describe("extractDistroFromUncPath", () => {
   it("extracts the distro from \\\\wsl.localhost UNC paths", () => {
-    expect(extractDistroFromUncPath("\\\\wsl.localhost\\Ubuntu-22.04\\home\\josh")).toBe(
+    expect(extractDistroFromUncPath("\\\\wsl.localhost\\Ubuntu-22.04\\home\\user")).toBe(
       "Ubuntu-22.04",
     );
   });
 
   it("extracts the distro from the legacy \\\\wsl$ UNC paths", () => {
-    expect(extractDistroFromUncPath("\\\\wsl$\\Debian\\home\\josh")).toBe("Debian");
+    expect(extractDistroFromUncPath("\\\\wsl$\\Debian\\home\\user")).toBe("Debian");
   });
 
   it("returns null for non-UNC Windows paths", () => {
-    expect(extractDistroFromUncPath("C:\\Users\\Josh\\project")).toBeNull();
+    expect(extractDistroFromUncPath("C:\\Users\\User\\project")).toBeNull();
   });
 
   it("returns null when the segment is not a valid distro name", () => {
@@ -98,8 +98,8 @@ describe("extractDistroFromUncPath", () => {
 
 describe("wslUncPathToLinuxPath", () => {
   it("maps WSL UNC paths back to Linux absolute paths", () => {
-    expect(wslUncPathToLinuxPath("\\\\wsl.localhost\\Ubuntu-22.04\\home\\josh\\repo")).toBe(
-      "/home/josh/repo",
+    expect(wslUncPathToLinuxPath("\\\\wsl.localhost\\Ubuntu-22.04\\home\\user\\repo")).toBe(
+      "/home/user/repo",
     );
   });
 
@@ -110,7 +110,7 @@ describe("wslUncPathToLinuxPath", () => {
 
   it("rejects invalid distro names and non-WSL paths", () => {
     expect(wslUncPathToLinuxPath("\\\\wsl.localhost\\bad!name\\home")).toBeNull();
-    expect(wslUncPathToLinuxPath("C:\\Users\\Josh\\repo")).toBeNull();
+    expect(wslUncPathToLinuxPath("C:\\Users\\User\\repo")).toBeNull();
   });
 });
 
@@ -126,20 +126,20 @@ describe("resolveWslPickFolderDefaultPath", () => {
 
   it("maps Linux initial paths to WSL UNC paths", () => {
     expect(
-      resolveWslPickFolderDefaultPath({ initialPath: "/home/josh/project" }, config, distros),
-    ).toBe("\\\\wsl.localhost\\Debian\\home\\josh\\project");
+      resolveWslPickFolderDefaultPath({ initialPath: "/home/user/project" }, config, distros),
+    ).toBe("\\\\wsl.localhost\\Debian\\home\\user\\project");
   });
 
   it("expands ~/path against the user's home dir when known", () => {
     expect(
-      resolveWslPickFolderDefaultPath({ initialPath: "~/project" }, config, distros, "/home/josh"),
-    ).toBe("\\\\wsl.localhost\\Debian\\home\\josh\\project");
+      resolveWslPickFolderDefaultPath({ initialPath: "~/project" }, config, distros, "/home/user"),
+    ).toBe("\\\\wsl.localhost\\Debian\\home\\user\\project");
   });
 
   it("resolves bare ~ to the user's home dir when known", () => {
     expect(
-      resolveWslPickFolderDefaultPath({ initialPath: "~" }, config, distros, "/home/josh"),
-    ).toBe("\\\\wsl.localhost\\Debian\\home\\josh");
+      resolveWslPickFolderDefaultPath({ initialPath: "~" }, config, distros, "/home/user"),
+    ).toBe("\\\\wsl.localhost\\Debian\\home\\user");
   });
 
   it("falls back to /home parent when the user's home dir isn't known", () => {
@@ -151,11 +151,11 @@ describe("resolveWslPickFolderDefaultPath", () => {
   it("preserves existing UNC initial paths", () => {
     expect(
       resolveWslPickFolderDefaultPath(
-        { initialPath: "\\\\wsl.localhost\\Ubuntu\\home\\josh" },
+        { initialPath: "\\\\wsl.localhost\\Ubuntu\\home\\user" },
         config,
         distros,
       ),
-    ).toBe("\\\\wsl.localhost\\Ubuntu\\home\\josh");
+    ).toBe("\\\\wsl.localhost\\Ubuntu\\home\\user");
   });
 });
 

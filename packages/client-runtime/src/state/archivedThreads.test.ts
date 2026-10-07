@@ -77,6 +77,7 @@ it("drops spawned child threads from archived snapshots", () => {
     hasPendingApprovals: false,
     hasPendingUserInput: false,
     hasActionableProposedPlan: false,
+    pullRequests: [],
     ...(spawn ? { spawn } : {}),
   });
   const snapshot: OrchestrationShellSnapshot = {

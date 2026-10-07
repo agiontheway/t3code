@@ -32,6 +32,7 @@ vi.mock("../state/session", async (importOriginal) => ({
 vi.mock("../state/entities", () => ({
   readThreadShell: () => null,
   useProjects: () => [],
+  useServerConfigs: () => new Map(),
 }));
 vi.mock("../remoteOpen", () => ({
   useRemoteOpenResolution: () => ({ state: { mode: "local-exec" }, isResolved: true }),
@@ -41,9 +42,9 @@ vi.mock("../editorPreferences", () => ({
   usePreferredEditor: () => [null, vi.fn()],
 }));
 vi.mock("~/lib/openPullRequestLink", () => ({
-  findProjectForChangeRequest: () => undefined,
-  matchesLinkedPullRequestUrl: () => false,
+  findProjectOnChangeRequestHost: () => undefined,
   parseChangeRequestUrl: () => null,
+  resolvePullRequestPreviewTarget: () => null,
   useOpenChangeRequestLink: () => vi.fn(),
 }));
 
@@ -182,6 +183,45 @@ describe("ChatMarkdown workspace images", () => {
       },
     ]);
     expect(html).toContain("https://signed.test/workspace-image.svg");
+  });
+
+  it("keeps Windows path backslashes that CommonMark would read as escapes", () => {
+    const html = render(
+      [
+        String.raw`![inline](C:\Users\shawn\.t3\_build\workspace-image.svg)`,
+        "![reference][shot]",
+        String.raw`[shot]: C:\Users\shawn\.t3\workspace-image.svg`,
+        String.raw`[settings](C:\Users\shawn\.claude\settings.json)`,
+        String.raw`![unc](\\wsl.localhost\Ubuntu\.t3\workspace-image.svg)`,
+      ].join("\n\n"),
+    );
+
+    expect(testState.resources).toEqual([
+      {
+        _tag: "media-file",
+        threadId: threadRef.threadId,
+        path: String.raw`C:\Users\shawn\.t3\_build\workspace-image.svg`,
+      },
+      {
+        _tag: "media-file",
+        threadId: threadRef.threadId,
+        path: "C:/Users/shawn/.t3/workspace-image.svg",
+      },
+      {
+        _tag: "media-file",
+        threadId: threadRef.threadId,
+        path: String.raw`\\wsl.localhost\Ubuntu\.t3\workspace-image.svg`,
+      },
+    ]);
+    expect(html).toContain('href="C:/Users/shawn/.claude/settings.json"');
+  });
+
+  it("still decodes character references in Windows image paths", () => {
+    render("![amp](C:/Users/shawn/a&amp;b.svg)");
+
+    expect(testState.resources).toEqual([
+      { _tag: "media-file", threadId: threadRef.threadId, path: "C:/Users/shawn/a&b.svg" },
+    ]);
   });
 
   it("keeps a tall image placeholder and loaded image at the same proportional bounds", () => {

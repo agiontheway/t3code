@@ -30,7 +30,7 @@ export function hasCrossProviderRouteEdits(routes: CrossProviderAgentRoutes): bo
  * Editing the defaults materialises them first so the first switch does not
  * silently drop every other candidate route from the stored map.
  */
-export function materializeCrossProviderRoutes(
+function materializeCrossProviderRoutes(
   routes: CrossProviderAgentRoutes,
   defaults: CrossProviderAgentRoutes,
 ): CrossProviderAgentRoutes {

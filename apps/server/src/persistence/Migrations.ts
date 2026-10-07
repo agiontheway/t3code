@@ -10,6 +10,9 @@
 
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import ProjectionThreadsSpawn from "./ForkMigrations/001_ProjectionThreadsSpawn.ts";
+import HeartbeatJobs from "./ForkMigrations/002_HeartbeatJobs.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -61,7 +64,11 @@ import Migration0046 from "./Migrations/046_RepairAutomaticSettlementTimestamps.
 import Migration0047 from "./Migrations/047_ProjectionProjectIcon.ts";
 import Migration0048 from "./Migrations/048_ProjectionThreadBranchPullRequest.ts";
 import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
-import Migration0050 from "./Migrations/050_ProjectionThreadsSpawn.ts";
+import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
+import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
+import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
+import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
+import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -73,7 +80,7 @@ import Migration0050 from "./Migrations/050_ProjectionThreadsSpawn.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-export const migrationEntries = [
+const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -123,12 +130,16 @@ export const migrationEntries = [
   [47, "ProjectionProjectIcon", Migration0047],
   [48, "ProjectionThreadBranchPullRequest", Migration0048],
   [49, "ProjectionThreadsActiveOrderKey", Migration0049],
-  [50, "ProjectionThreadsSpawn", Migration0050],
+  [50, "ProjectionThreadPullRequests", Migration0050],
+  [51, "ProjectionThreadMessageContext", Migration0051],
+  [52, "ProjectionThreadTitleState", Migration0052],
+  [53, "PullRequestFilesViewed", Migration0053],
+  [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
 
-export const makeMigrationLoader = (throughId?: number) =>
+const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
     Object.fromEntries(
       migrationEntries
@@ -144,6 +155,7 @@ export const makeMigrationLoader = (throughId?: number) =>
 const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
+  /** Historical upstream schema boundary for migration tests; fork migrations run on full startup. */
   readonly toMigrationInclusive?: number | undefined;
 }
 
@@ -160,7 +172,90 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
+  const sql = yield* SqlClient.SqlClient;
+  const executedMigrations = yield* sql.withTransaction(
+    Effect.gen(function* () {
+      // The 0.0.39 fork used upstream's next ID. Repair that exact lineage before
+      // the numeric upstream runner can skip the PR schema now assigned to 50.
+      if (toMigrationInclusive === undefined || toMigrationInclusive >= 50) {
+        const tables =
+          yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
+        if (tables.length > 0) {
+          const recorded = yield* sql<{
+            readonly name: string;
+          }>`SELECT name FROM effect_sql_migrations WHERE migration_id = 50`;
+          const name = recorded[0]?.name;
+          if (
+            name !== undefined &&
+            name !== "ProjectionThreadsSpawn" &&
+            name !== "ProjectionThreadPullRequests"
+          ) {
+            return yield* new Migrator.MigrationError({
+              kind: "BadState",
+              message: `Unrecognized migration 50: ${name}`,
+            });
+          }
+          if (name === undefined) {
+            const later =
+              yield* sql`SELECT migration_id FROM effect_sql_migrations WHERE migration_id > 50 LIMIT 1`;
+            if (later.length > 0) {
+              return yield* new Migrator.MigrationError({
+                kind: "BadState",
+                message: "Migration history after 50 is missing migration 50",
+              });
+            }
+          }
+          if (name === "ProjectionThreadsSpawn") {
+            const columns = yield* sql<{
+              readonly name: string;
+            }>`PRAGMA table_info(projection_threads)`;
+            if (!columns.some((column) => column.name === "spawn_json")) {
+              return yield* new Migrator.MigrationError({
+                kind: "BadState",
+                message:
+                  "Legacy fork migration 50 is recorded but spawn ownership schema is missing",
+              });
+            }
+            yield* Migration0050;
+            yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadPullRequests' WHERE migration_id = 50 AND name = 'ProjectionThreadsSpawn'`;
+          } else if (name === "ProjectionThreadPullRequests") {
+            const columns = yield* sql<{
+              readonly name: string;
+            }>`PRAGMA table_info(projection_thread_pull_requests)`;
+            const required = [
+              "thread_id",
+              "host",
+              "repository",
+              "number",
+              "url",
+              "source",
+              "linked_at",
+              "snapshot_json",
+              "stack_json",
+            ];
+            if (required.some((column) => !columns.some((existing) => existing.name === column))) {
+              return yield* new Migrator.MigrationError({
+                kind: "BadState",
+                message: "Migration 50 is recorded but the pull-request schema is incomplete",
+              });
+            }
+          }
+        }
+      }
+      const upstream = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
+      if (toMigrationInclusive === undefined) {
+        // A separate ledger leaves every future official migration ID available.
+        yield* run({
+          table: "t3_fork_migrations",
+          loader: Migrator.fromRecord({
+            "1_ProjectionThreadsSpawn": ProjectionThreadsSpawn,
+            "2_HeartbeatJobs": HeartbeatJobs,
+          }),
+        });
+      }
+      return upstream;
+    }),
+  );
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
