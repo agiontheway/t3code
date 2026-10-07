@@ -6404,6 +6404,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           version: 1,
           type: "providerStatuses",
           payload: {
+            crossProviderAgentRouteDefaults: { codex: { enabled: true, models: [] } },
             providers: hasLimits
               ? [
                   {
@@ -6471,7 +6472,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.deepEqual(second, {
           version: 1,
           type: "providerStatuses",
-          payload: { providers: [{ ...codex, version: "1.0.1" }] },
+          payload: {
+            crossProviderAgentRouteDefaults: { codex: { enabled: true, models: [] } },
+            providers: [{ ...codex, version: "1.0.1" }],
+          },
         });
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
@@ -6550,6 +6554,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           version: 1,
           type: "providerStatuses",
           payload: {
+            crossProviderAgentRouteDefaults: { codex: { enabled: true, models: [] } },
             providers: [
               {
                 ...codex,

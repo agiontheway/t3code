@@ -843,8 +843,8 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
-export const DEFAULT_CROSS_PROVIDER_AGENT_MAX_DEPTH = 2;
-export const DEFAULT_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS = 5000;
+const DEFAULT_CROSS_PROVIDER_AGENT_MAX_DEPTH = 2;
+const DEFAULT_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS = 5000;
 export const MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS = 500;
 
 export const CrossProviderAgentMaxDepth = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));

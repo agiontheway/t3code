@@ -24,7 +24,7 @@ export interface CrossProviderAgentResolvedRoute {
  * (an OpenRouter-backed Codex instance, for example) report `unknown` rather
  * than `authenticated`, and they are legitimate targets.
  */
-export function isCrossProviderAgentCandidate(provider: ServerProvider): boolean {
+function isCrossProviderAgentCandidate(provider: ServerProvider): boolean {
   return (
     CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS.includes(provider.driver) &&
     isProviderAvailable(provider) &&
