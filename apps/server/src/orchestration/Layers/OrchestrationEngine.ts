@@ -40,6 +40,7 @@ import {
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
+import { HeartbeatThreadBusyError } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
@@ -53,6 +54,7 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
   OrchestrationCommandPreviouslyRejectedError,
 );
 const isOrchestrationCommandIdConflictError = Schema.is(OrchestrationCommandIdConflictError);
+const isHeartbeatThreadBusyError = Schema.is(HeartbeatThreadBusyError);
 
 interface CommandEnvelope {
   command: OrchestrationCommand;
@@ -212,6 +214,29 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           });
         }
 
+        // New and moved projects do not carry a resolved identity in the event-derived
+        // command model. Legacy PR edits need it to identify the link they replace.
+        if (
+          envelope.command.type === "thread.meta.update" &&
+          envelope.command.linkedPullRequest !== undefined
+        ) {
+          const threadId = envelope.command.threadId;
+          const thread = commandReadModel.threads.find((thread) => thread.id === threadId);
+          if (thread !== undefined) {
+            const project = yield* projectionSnapshotQuery.getProjectShellById(thread.projectId);
+            if (Option.isSome(project)) {
+              commandReadModel = {
+                ...commandReadModel,
+                projects: commandReadModel.projects.map((entry) =>
+                  entry.id === thread.projectId
+                    ? { ...entry, repositoryIdentity: project.value.repositoryIdentity }
+                    : entry,
+                ),
+              };
+            }
+          }
+        }
+
         // Command snapshots omit activities at startup and cap them while running.
         // Read this request's durable state before deciding how to send the answer.
         const userInputActivity =
@@ -219,9 +244,19 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.type === "thread.user-input.dismiss"
             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
             : Option.none();
+        // The command read model intentionally caps activities while running,
+        // so the authoritative child-result projection is the source for
+        // accepted-but-unfinished queued turns and completed/failed states.
+        const heartbeatResultDeliveries =
+          envelope.command.type === "thread.heartbeat.due"
+            ? yield* projectionSnapshotQuery.getCrossProviderResultDeliveries(
+                envelope.command.threadId,
+              )
+            : [];
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
+          heartbeatResultDeliveries,
           ...(Option.isSome(userInputActivity)
             ? { userInputActivity: userInputActivity.value }
             : {}),
@@ -366,7 +401,10 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               ),
             );
 
-            if (isOrchestrationCommandRejection(error)) {
+            // Heartbeat busy is admission scheduling, not a command semantic
+            // verdict. Its stable occurrence command stays retryable; a later
+            // replay of the same command is still idempotent if it was accepted.
+            if (isOrchestrationCommandRejection(error) && !isHeartbeatThreadBusyError(error)) {
               yield* commandReceiptRepository
                 .upsert({
                   commandId: envelope.command.commandId,
@@ -377,7 +415,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                   status: "rejected",
                   error: error.message,
                 })
-                .pipe(Effect.catch(() => Effect.void));
+                .pipe(Effect.ignore);
             }
           }
 

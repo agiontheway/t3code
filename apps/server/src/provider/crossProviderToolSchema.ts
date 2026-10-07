@@ -12,7 +12,7 @@ import type { CrossProviderToolSpec } from "./CrossProviderAgentToolHost.ts";
  * Effect emits refinement checks as `allOf: [{ minimum: 1 }]` siblings of
  * `type`; fold them onto the node so both bindings see one flat schema.
  */
-export function flattenJsonSchemaAllOf(schema: unknown): unknown {
+function flattenJsonSchemaAllOf(schema: unknown): unknown {
   if (!Predicate.isObject(schema)) return schema;
   const { allOf, ...rest } = schema;
   const merged: Record<string, unknown> = { ...rest };
@@ -37,7 +37,7 @@ const EMPTY_OBJECT_SCHEMA: Readonly<Record<string, unknown>> = {
 };
 
 /** Flat JSON Schema object for one tool input, derived from its Effect schema. */
-export function toolInputJsonSchema(schema: Schema.Top): Readonly<Record<string, unknown>> {
+function toolInputJsonSchema(schema: Schema.Top): Readonly<Record<string, unknown>> {
   const document = Schema.toJsonSchemaDocument(schema);
   const flattened = flattenJsonSchemaAllOf(document.schema);
   // `Schema.Struct({})` describes "object or array"; a tool with no

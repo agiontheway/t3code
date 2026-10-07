@@ -17,7 +17,7 @@ model's default.
 
 ## Turning it on
 
-Open **Settings → Integrations → Agents** and enable **Cross-provider agent access**. New and resumed
+Open **Settings → Integrations → Agents**, select the environment you want to configure, and enable **Cross-provider agent access**. New and resumed
 Claude sessions and new Codex sessions started after that get the tools; running sessions pick them
 up on their next start.
 
@@ -28,7 +28,7 @@ a delegated task may consume the other provider's paid quota.
 
 By default every enabled Claude and Codex instance is a target with all of its models, including
 API-key-backed instances; only an instance that is explicitly signed out is left out.
-Expand **Routes** to switch instances off or limit the models an agent may pick. **Restore
+Select one connected environment and expand **Routes** to switch its instances off or limit the models an agent may pick. **Restore
 defaults** discards your edits and goes back to tracking your provider list.
 
 **Max orchestration depth** decides how far delegation can nest: `1` lets the parent spawn children

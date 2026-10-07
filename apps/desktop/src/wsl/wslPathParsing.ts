@@ -71,7 +71,7 @@ export function resolveWslPickFolderDefaultPath(
   config: WslConfig,
   distros: readonly WslDistro[],
   // Absolute Linux path of the user's home dir inside the chosen distro
-  // (e.g. "/home/josh"). When known, `~` and `~/...` expand against this so
+  // (e.g. "/home/user"). When known, `~` and `~/...` expand against this so
   // we don't open the picker at a non-existent `/home/<rest>`. When null we
   // fall back to the `/home` parent — wrong directory but at least it exists.
   userHome: string | null = null,
