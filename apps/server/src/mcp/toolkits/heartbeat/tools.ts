@@ -30,7 +30,7 @@ const dependencies = [
   ServerSettings.ServerSettingsService,
 ];
 
-export const heartbeatToolVisible = () =>
+const heartbeatToolVisible = () =>
   McpInvocationContext.currentMcpInvocationHasCapability("heartbeat");
 
 export const HeartbeatCreateToolInput = Schema.Struct({

@@ -66,7 +66,7 @@ const DYNAMIC_TOOL_CALL_CONCURRENCY = 16;
 export const CODEX_RESUMED_WITHOUT_TOOLS_NOTICE =
   "Cross-provider agent tools are not available on a resumed Codex session; start a new thread to use them.";
 
-export function toCodexDynamicToolSpec(
+function toCodexDynamicToolSpec(
   spec: CrossProviderToolSpec,
 ): EffectCodexSchema.ClientRequest__DynamicToolSpec {
   return {

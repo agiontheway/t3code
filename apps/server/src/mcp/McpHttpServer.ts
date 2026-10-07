@@ -649,7 +649,7 @@ export const PullRequestsToolkitRegistrationLive = McpServer.toolkit(PullRequest
   Layer.provide(PullRequestsToolkitHandlersLive),
 );
 
-export const HeartbeatToolkitRegistrationLive = McpServer.toolkit(HeartbeatToolkit).pipe(
+const HeartbeatToolkitRegistrationLive = McpServer.toolkit(HeartbeatToolkit).pipe(
   Layer.provide(HeartbeatToolkitHandlersLive),
 );
 

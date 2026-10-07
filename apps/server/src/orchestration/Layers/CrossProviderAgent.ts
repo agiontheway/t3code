@@ -82,13 +82,13 @@ import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 
 /** Task type stamped on the parent's Direct Spawns row for a cross-provider child. */
-export const CROSS_PROVIDER_AGENT_TASK_TYPE = "cross_provider_agent";
+const CROSS_PROVIDER_AGENT_TASK_TYPE = "cross_provider_agent";
 const CROSS_PROVIDER_AGENT_ROLE = "cross-provider";
 const MAX_OWNERSHIP_HOPS = 32;
 const MAX_TITLE_CHARS = 60;
 const MAX_SUMMARY_CHARS = 200;
 /** Parent-row telemetry is coalesced to at most one mirror per child per interval. */
-export const PROGRESS_MIRROR_INTERVAL_MS = 1000;
+const PROGRESS_MIRROR_INTERVAL_MS = 1000;
 /** Child-thread activities that carry the telemetry a native row would show. */
 const CHILD_TELEMETRY_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
   "context-window.updated",
@@ -145,7 +145,7 @@ export function evaluateCrossProviderChild(
 }
 
 /** Final assistant text of the settled turn (falls back to the last assistant message). */
-export function finalAssistantText(thread: OrchestrationThread, turnId: TurnId | null): string {
+function finalAssistantText(thread: OrchestrationThread, turnId: TurnId | null): string {
   const assistant = thread.messages.filter((message) => message.role === "assistant");
   const forTurn = turnId === null ? [] : assistant.filter((message) => message.turnId === turnId);
   return (forTurn.length > 0 ? forTurn : assistant).at(-1)?.text ?? "";
@@ -265,7 +265,7 @@ function effectiveThreadEffort(input: {
  * parent's effective effort when the target offers it, else the target's
  * default. A target without an effort option gets none.
  */
-export function resolveCrossProviderEffort(input: {
+function resolveCrossProviderEffort(input: {
   readonly explicit: string | undefined;
   readonly parent: {
     readonly driver: ProviderDriverKind;
@@ -351,7 +351,7 @@ export const EMPTY_CHILD_TELEMETRY: CrossProviderChildTelemetry = {
  * `usedTokens` is context occupancy (it shrinks on compaction) and is never
  * a row total.
  */
-export function processedTokensFromActivity(payload: unknown): number | undefined {
+function processedTokensFromActivity(payload: unknown): number | undefined {
   return Predicate.isObject(payload) ? finiteCount(payload.totalProcessedTokens) : undefined;
 }
 
