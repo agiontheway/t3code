@@ -7435,7 +7435,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           version: 1,
           type: "providerStatuses",
           payload: {
-            crossProviderAgentRouteDefaults: { codex: { enabled: true, models: [] } },
+            crossProviderAgentRouteDefaults: {
+              [ProviderInstanceId.make("codex")]: { enabled: true, models: [] },
+            },
             providers: hasLimits
               ? [
                   {
@@ -7504,7 +7506,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           version: 1,
           type: "providerStatuses",
           payload: {
-            crossProviderAgentRouteDefaults: { codex: { enabled: true, models: [] } },
+            crossProviderAgentRouteDefaults: {
+              [ProviderInstanceId.make("codex")]: { enabled: true, models: [] },
+            },
             providers: [{ ...codex, version: "1.0.1" }],
           },
         });
@@ -7585,7 +7589,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           version: 1,
           type: "providerStatuses",
           payload: {
-            crossProviderAgentRouteDefaults: { codex: { enabled: true, models: [] } },
+            crossProviderAgentRouteDefaults: {
+              [ProviderInstanceId.make("codex")]: { enabled: true, models: [] },
+            },
             providers: [
               {
                 ...codex,
