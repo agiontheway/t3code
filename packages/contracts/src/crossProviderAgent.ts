@@ -20,13 +20,13 @@ export const CROSS_PROVIDER_AGENT_TOOL_NAMES = [
 export type CrossProviderAgentToolName = (typeof CROSS_PROVIDER_AGENT_TOOL_NAMES)[number];
 
 /** Drivers that may act as cross-provider callers and targets. */
-export const CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS = ["claudeAgent", "codex"] as const;
+const CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS = ["claudeAgent", "codex"] as const;
 export type CrossProviderAgentSupportedDriverKind =
   (typeof CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS)[number];
 export const CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS: ReadonlyArray<ProviderDriverKind> =
   CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS.map((kind) => ProviderDriverKind.make(kind));
 
-export function isCrossProviderAgentSupportedDriverKind(
+function isCrossProviderAgentSupportedDriverKind(
   driver: string,
 ): driver is CrossProviderAgentSupportedDriverKind {
   return (CROSS_PROVIDER_AGENT_SUPPORTED_DRIVER_KINDS as ReadonlyArray<string>).includes(driver);
@@ -39,7 +39,7 @@ export function isCrossProviderAgentSupportedDriverKind(
  * applies it exactly as it would a user-selected one. Keyed by the supported
  * driver union so adding a driver forces a decision here.
  */
-export const CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS: Readonly<
+const CROSS_PROVIDER_AGENT_EFFORT_OPTION_IDS: Readonly<
   Record<CrossProviderAgentSupportedDriverKind, string>
 > = {
   claudeAgent: "effort",
@@ -107,8 +107,8 @@ export const CrossProviderAgentSpawnInput = Schema.Struct({
 export type CrossProviderAgentSpawnInput = typeof CrossProviderAgentSpawnInput.Type;
 
 /** Bounds on one wait call; larger inputs fail with `invalid_input`. */
-export const CROSS_PROVIDER_AGENT_WAIT_MAX_CHILDREN = 32;
-export const CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS = 600;
+const CROSS_PROVIDER_AGENT_WAIT_MAX_CHILDREN = 32;
+const CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS = 600;
 
 export const CrossProviderAgentWaitInput = Schema.Struct({
   childIds: Schema.Array(ChildIdInput)
