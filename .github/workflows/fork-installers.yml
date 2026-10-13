@@ -1,0 +1,119 @@
+name: Fork installer artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["build/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            target: AppImage
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+            target: dmg
+          - runner: macos-15-intel
+            platform: mac
+            arch: x64
+            target: dmg
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      T3CODE_DESKTOP_REQUIRE_CONNECT: "true"
+    steps:
+      - name: Checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          run-install: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev pkg-config imagemagick
+
+      - name: Install dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Configure Connect and preview version
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          base_version="$(node -p "require('./apps/desktop/package.json').version")"
+          version="${base_version}-preview.$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          node scripts/update-release-package-versions.ts "$version"
+          echo "BUILD_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build installers without publishing
+        run: node scripts/build-desktop-artifact.ts --platform ${{ matrix.platform }} --arch ${{ matrix.arch }} --target ${{ matrix.target }} --build-version "$BUILD_VERSION" --output-dir release --verbose
+
+      - name: Verify embedded Connect configuration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          expected = dict(line.split('=', 1) for line in Path('.env').read_text().splitlines() if line.startswith('T3CODE_'))
+          scopes = {
+              'apps/desktop/dist-electron': ['T3CODE_CLERK_PUBLISHABLE_KEY'],
+              'apps/server/dist': ['T3CODE_CLERK_PUBLISHABLE_KEY', 'T3CODE_CLERK_JWT_TEMPLATE', 'T3CODE_CLERK_CLI_OAUTH_CLIENT_ID', 'T3CODE_RELAY_URL'],
+              'apps/server/dist/client': ['T3CODE_CLERK_PUBLISHABLE_KEY', 'T3CODE_CLERK_JWT_TEMPLATE', 'T3CODE_RELAY_URL'],
+          }
+          for directory, keys in scopes.items():
+              payload = b'\n'.join(p.read_bytes() for p in Path(directory).rglob('*') if p.suffix in ('.js', '.cjs', '.mjs'))
+              for key in keys:
+                  assert expected[key].encode() in payload, f'{directory}: missing {key}'
+              print(f'{directory}: Connect configuration verified')
+          PY
+
+      - name: Checksum installers
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root = Path('release')
+          files = sorted(p for p in root.iterdir() if p.suffix in ('.AppImage', '.deb', '.dmg', '.zip'))
+          assert files, 'No installer artifacts produced'
+          (root / 'SHA256SUMS').write_text(''.join(f'{hashlib.file_digest(p.open("rb"), "sha256").hexdigest()}  {p.name}\n' for p in files))
+          PY
+
+      - name: Upload installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installers-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.dmg
+            release/*.zip
+            release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

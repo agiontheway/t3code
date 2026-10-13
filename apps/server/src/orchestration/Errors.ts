@@ -42,9 +42,15 @@ export class HeartbeatThreadBusyError extends Schema.TaggedError<HeartbeatThread
   }
 }
 
+export class OrchestrationThreadBusyError extends Schema.TaggedError<OrchestrationThreadBusyError>()(
+  "OrchestrationThreadBusyError",
+  { threadId: ThreadId },
+) {}
+
 export const OrchestrationCommandRejection = Schema.Union([
   OrchestrationCommandInvariantError,
   HeartbeatThreadBusyError,
+  OrchestrationThreadBusyError,
   OrchestrationThreadSettleBlockedError,
 ]);
 export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;

@@ -40,7 +40,7 @@ import {
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
-import { HeartbeatThreadBusyError } from "../Errors.ts";
+import { HeartbeatThreadBusyError, OrchestrationThreadBusyError } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
@@ -54,6 +54,7 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
   OrchestrationCommandPreviouslyRejectedError,
 );
 const isOrchestrationCommandIdConflictError = Schema.is(OrchestrationCommandIdConflictError);
+const isOrchestrationThreadBusyError = Schema.is(OrchestrationThreadBusyError);
 const isHeartbeatThreadBusyError = Schema.is(HeartbeatThreadBusyError);
 
 interface CommandEnvelope {
@@ -404,7 +405,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             // Heartbeat busy is admission scheduling, not a command semantic
             // verdict. Its stable occurrence command stays retryable; a later
             // replay of the same command is still idempotent if it was accepted.
-            if (isOrchestrationCommandRejection(error) && !isHeartbeatThreadBusyError(error)) {
+            if (
+              isOrchestrationCommandRejection(error) &&
+              !isHeartbeatThreadBusyError(error) &&
+              !isOrchestrationThreadBusyError(error)
+            ) {
               yield* commandReceiptRepository
                 .upsert({
                   commandId: envelope.command.commandId,

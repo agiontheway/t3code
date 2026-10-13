@@ -1351,6 +1351,7 @@ export const ThreadHeartbeatProvenance = Schema.Struct({
 export type ThreadHeartbeatProvenance = typeof ThreadHeartbeatProvenance.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
+  requireIdle: Schema.optional(Schema.Boolean),
   type: Schema.Literal("thread.turn.start"),
   commandId: CommandId,
   threadId: ThreadId,

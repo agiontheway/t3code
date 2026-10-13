@@ -9,6 +9,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
@@ -83,6 +84,43 @@ const turnStartCommand = {
   interactionMode: "default" as const,
   createdAt,
 };
+
+it.layer(NodeServices.layer)("integration idle admission", (it) => {
+  it.effect("admits idle starts but rejects queued human work using admission time", () =>
+    Effect.gen(function* () {
+      const model = yield* readModelWithThread;
+      const accepted = yield* decideOrchestrationCommand({
+        command: { ...turnStartCommand, requireIdle: true },
+        readModel: model,
+      });
+      expect(Array.isArray(accepted)).toBe(true);
+      const queuedAt = DateTime.formatIso(yield* DateTime.now);
+      const occupied = {
+        ...model,
+        threads: model.threads.map((thread) => ({
+          ...thread,
+          messages: [
+            {
+              id: MessageId.make("queued-human"),
+              role: "user" as const,
+              text: "human work",
+              attachments: [],
+              turnId: null,
+              streaming: false,
+              createdAt: queuedAt,
+              updatedAt: queuedAt,
+            },
+          ],
+        })),
+      };
+      const rejected = yield* decideOrchestrationCommand({
+        command: { ...turnStartCommand, requireIdle: true },
+        readModel: occupied,
+      }).pipe(Effect.flip);
+      expect(rejected._tag).toBe("OrchestrationThreadBusyError");
+    }),
+  );
+});
 
 it.layer(NodeServices.layer)("thread.message.user.append", (it) => {
   it.effect("persists a user message without a turn, tagged as deferred", () =>

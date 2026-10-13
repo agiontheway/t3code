@@ -35,6 +35,7 @@ import type * as PlatformError from "effect/PlatformError";
 
 import {
   HeartbeatThreadBusyError,
+  OrchestrationThreadBusyError,
   OrchestrationCommandInvariantError,
   OrchestrationThreadSettleBlockedError,
   type OrchestrationCommandRejection,
@@ -1416,6 +1417,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        command.requireIdle &&
+        (targetThread.archivedAt !== null ||
+          targetThread.latestTurn?.state === "running" ||
+          targetThread.session?.activeTurnId != null ||
+          targetThread.session?.status === "starting" ||
+          targetThread.session?.status === "running" ||
+          openRequests(targetThread).size > 0 ||
+          hasQueuedTurnStartForThread(targetThread, yield* nowIso))
+      ) {
+        return yield* new OrchestrationThreadBusyError({ threadId: command.threadId });
+      }
       const sourceProposedPlan = command.sourceProposedPlan;
       const sourceThread = sourceProposedPlan
         ? yield* requireThread({

@@ -615,7 +615,83 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
     }),
   ) {}
 
+export const SignalCommandName = Schema.String.check(Schema.isPattern(/^\/[a-z][a-z0-9-]{0,31}$/));
+export const SignalCommandRoute = Schema.Struct({
+  command: SignalCommandName,
+  threadId: ThreadId,
+  skill: Schema.String.check(Schema.isPattern(/^[a-zA-Z][a-zA-Z0-9:_-]{0,100}$/)),
+  skillArguments: Schema.optional(Schema.String.check(Schema.isMaxLength(2000))),
+  description: Schema.optional(Schema.String.check(Schema.isMaxLength(200))),
+});
+export type SignalCommandRoute = typeof SignalCommandRoute.Type;
+export const SignalConfigure = Schema.Struct({
+  commands: Schema.Array(SignalCommandRoute).check(Schema.isMinLength(1), Schema.isMaxLength(20)),
+});
+export type SignalConfigure = typeof SignalConfigure.Type;
+export const SignalBinding = Schema.Struct({
+  connectionId: Schema.String,
+  environmentId: Schema.String,
+  commands: Schema.Array(SignalCommandRoute),
+  enabled: Schema.Boolean,
+});
+export type SignalBinding = typeof SignalBinding.Type;
+export const SignalTrigger = Schema.Struct({
+  connectionId: Schema.String,
+  environmentId: Schema.String,
+  requestId: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+  command: SignalCommandName,
+});
+export type SignalTrigger = typeof SignalTrigger.Type;
+export const SignalTriggerResult = Schema.Struct({ threadId: ThreadId, messageId: Schema.String });
+export type SignalTriggerResult = typeof SignalTriggerResult.Type;
+export class SignalIntegrationError extends Schema.TaggedError<SignalIntegrationError>()(
+  "SignalIntegrationError",
+  { reason: Schema.String },
+  { httpApiStatus: 400 },
+) {}
+
+class EnvironmentSignalHttpApi extends HttpApiGroup.make("signal")
+  .add(
+    HttpApiEndpoint.get("choices", "/api/integrations/signal/skills/:threadId", {
+      headers: OptionalBearerHeaders,
+      params: { threadId: ThreadId },
+      success: Schema.Array(Schema.String),
+      error: [EnvironmentAuthInvalidError, EnvironmentScopeRequiredError, SignalIntegrationError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("get", "/api/integrations/signal", {
+      headers: OptionalBearerHeaders,
+      success: Schema.NullOr(SignalBinding),
+      error: [EnvironmentAuthInvalidError, EnvironmentScopeRequiredError, SignalIntegrationError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("configure", "/api/integrations/signal", {
+      headers: OptionalBearerHeaders,
+      payload: SignalConfigure,
+      success: Schema.Struct({ binding: SignalBinding, token: Schema.String }),
+      error: [EnvironmentAuthInvalidError, EnvironmentScopeRequiredError, SignalIntegrationError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("revoke", "/api/integrations/signal", {
+      headers: OptionalBearerHeaders,
+      success: Schema.Void,
+      error: [EnvironmentAuthInvalidError, EnvironmentScopeRequiredError, SignalIntegrationError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("trigger", "/api/integrations/signal/trigger", {
+      headers: OptionalBearerHeaders,
+      payload: SignalTrigger,
+      success: SignalTriggerResult,
+      error: SignalIntegrationError,
+    }),
+  ) {}
+
 export class EnvironmentHttpApi extends HttpApi.make("environment")
+  .add(EnvironmentSignalHttpApi)
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)

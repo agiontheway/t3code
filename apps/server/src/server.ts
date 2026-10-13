@@ -1,3 +1,5 @@
+import { signalHttpApiLayer } from "./signal/http.ts";
+import * as SignalIntegration from "./signal/SignalIntegration.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
@@ -614,6 +616,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(authHttpApiLayer),
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(signalHttpApiLayer.pipe(Layer.provide(SignalIntegration.layer))),
       Layer.provide(pullRequestHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),

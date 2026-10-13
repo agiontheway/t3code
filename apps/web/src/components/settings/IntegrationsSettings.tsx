@@ -1,3 +1,4 @@
+import { SignalSettings } from "./SignalSettings";
 import { DeviceHostUpdates } from "../device/DeviceHostUpdates";
 import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
@@ -1795,6 +1796,7 @@ export function IntegrationsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SignalSettings />
       <SettingsSection id="agents" title="Agents">
         <CrossProviderAgentAccessSetting />
         <CrossProviderAgentMaxDepthSetting />
