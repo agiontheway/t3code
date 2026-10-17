@@ -12,6 +12,8 @@ import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
+// fork: the fork's own migration ledger and its legacy id-50 repair.
+import { repairLegacyForkMigration50, runForkMigrations } from "./ForkMigrationLedger.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -214,6 +216,7 @@ const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function*
 const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
+  // fork: fork migrations run only on full startup, so a bounded run stays a historical schema.
   readonly toMigrationInclusive?: number | undefined;
 }
 
@@ -230,6 +233,10 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  // fork: repair the 0.0.39 fork's id 50 before the numeric runner can skip upstream's 50.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 50) {
+    yield* repairLegacyForkMigration50();
+  }
   const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
   const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
@@ -240,6 +247,10 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ...previewMigrations,
     ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
   ];
+  // fork: a separate ledger after upstream; its runs are not part of the returned history.
+  if (toMigrationInclusive === undefined) {
+    yield* runForkMigrations();
+  }
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
