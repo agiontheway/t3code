@@ -73,6 +73,8 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as DelegationPolicy from "../orchestration-v2/fork/DelegationPolicy.ts"; // fork
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator"; // fork
 import {
   subagentResultForRun,
   delegatedTaskProgress,
@@ -134,6 +136,8 @@ export interface OrchestratorMcpServiceShape {
   readonly delegateTask: (
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTaskInput,
+    // fork: set by agent_spawn; native delegate_task children never get orchestration.
+    fork?: { readonly allowOrchestration: boolean },
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
   readonly taskStatus: (
     scope: McpInvocationScope,
@@ -912,6 +916,9 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  // fork: optional so focused tests that assemble this service by hand keep upstream behaviour;
+  // the production composition always provides it.
+  const delegationPolicy = yield* Effect.serviceOption(DelegationPolicy.DelegationPolicy);
 
   /** A caller-named project, which must exist before anything is recorded against it. */
   const requireProject = (projectId: ProjectId) =>
@@ -1975,7 +1982,7 @@ const make = Effect.gen(function* () {
           },
         };
       }),
-    delegateTask: (callerScope, input) =>
+    delegateTask: (callerScope, input, fork) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
         const parentRun = parent.runs
@@ -2003,6 +2010,16 @@ const make = Effect.gen(function* () {
           operation: "delegate-task",
         });
         const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
+        // fork: delegation capability, depth cap and the child's grant row.
+        if (Option.isSome(delegationPolicy)) {
+          yield* delegationPolicy.value.admit({
+            scope,
+            parentThreadId: scope.thread.threadId,
+            childThreadId: IdAllocator.derive.delegatedTaskThread({ commandId }),
+            allowOrchestration: fork?.allowOrchestration === true,
+            replay: isRetryOfAcceptedDelegation,
+          });
+        }
         const target = yield* resolveTargetRechecking({
           parent,
           target: input.target,

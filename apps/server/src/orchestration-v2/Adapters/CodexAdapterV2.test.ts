@@ -681,6 +681,55 @@ describe("CodexAdapterV2 process spawning", () => {
     );
   });
 
+  // fork: codex-cli 0.162.1 reads `disabled_tools` (bare names) per MCP server entry.
+  it("disables the t3-code tools a credential lacks the fork capability for", () => {
+    const mcpSession = {
+      environmentId: EnvironmentId.make("environment-codex-mcp-fork"),
+      threadId: ThreadId.make("thread-codex-mcp-fork"),
+      providerSessionId: "mcp-session-codex-fork",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      endpoint: "http://127.0.0.1:43123/mcp",
+      authorizationHeader: "Bearer secret-codex-token",
+      browserToolsAvailable: true,
+    };
+    const t3Server = (capabilities: ReadonlySet<string>) =>
+      (
+        CodexAdapterV2.codexThreadRuntimeParams({ mcpSession: { ...mcpSession, capabilities } })
+          .config.mcp_servers as Record<string, Record<string, unknown>>
+      )["t3-code"];
+
+    assert.deepEqual(t3Server(new Set(["orchestration", "delegation", "heartbeat"])), {
+      url: "http://127.0.0.1:43123/mcp",
+      tool_timeout_sec: 3_900,
+      http_headers: { Authorization: "Bearer secret-codex-token" },
+      disabled_tools: [
+        "agent_catalog",
+        "agent_spawn",
+        "agent_wait",
+        "agent_result",
+        "agent_follow_up",
+        "agent_interrupt",
+      ],
+    });
+    assert.deepEqual(t3Server(new Set(["orchestration"]))?.disabled_tools, [
+      "agent_catalog",
+      "agent_spawn",
+      "agent_wait",
+      "agent_result",
+      "agent_follow_up",
+      "agent_interrupt",
+      "delegate_task",
+      "t3_heartbeat_create",
+      "t3_heartbeat_list",
+      "t3_heartbeat_delete",
+      "t3_heartbeat_wakeup",
+    ]);
+    assert.notProperty(
+      t3Server(new Set(["orchestration", "crossProviderAgents", "delegation", "heartbeat"])),
+      "disabled_tools",
+    );
+  });
+
   it.effect("resolves Windows command shims through the shared spawn policy", () =>
     Effect.gen(function* () {
       const command = yield* CodexAdapterV2.makeCodexAppServerSpawnCommand({

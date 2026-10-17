@@ -50,6 +50,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as DelegationGrants from "./fork/DelegationGrants.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
@@ -496,6 +497,7 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly delegationGrantsLayer?: Layer.Layer<DelegationGrants.DelegationGrants>; // fork
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -567,6 +569,7 @@ function layerTest(input: {
           layerTestStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
+          ...(input.delegationGrantsLayer === undefined ? [] : [input.delegationGrantsLayer]),
         ),
       ),
     ),
@@ -1901,7 +1904,8 @@ it.effect(
         assert.equal(resolved?.thread.threadId, threadId);
         assert.deepEqual(
           resolved?.capabilities,
-          new Set(["preview", "orchestration", "worktree", "pull-requests"]),
+          // fork: a root thread may delegate.
+          new Set(["preview", "orchestration", "worktree", "pull-requests", "delegation"]),
         );
 
         yield* manager.close(providerSessionId);
@@ -1958,7 +1962,8 @@ it.effect(
         const resolved = yield* registry.resolve(token!);
         assert.deepEqual(
           resolved?.capabilities,
-          new Set(["orchestration", "worktree", "pull-requests"]),
+          // fork: a root thread may delegate; heartbeat access defaults on.
+          new Set(["orchestration", "worktree", "pull-requests", "delegation", "heartbeat"]),
         );
 
         yield* manager.close(providerSessionId);
@@ -2025,6 +2030,213 @@ it.effect("ProviderSessionManagerV2 fails browser access closed for a missing th
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, false);
   }),
+);
+
+// fork: delegation, cross-provider agent and heartbeat bits on the minted credential.
+const forkProjectId = ProjectId.make("project-provider-session-manager-fork");
+const forkParentThreadId = ThreadId.make("thread-provider-session-manager-fork-parent");
+
+function mintForkCapabilities(input: {
+  readonly threadId: ThreadId;
+  /** Makes the thread a delegated child; `grant` undefined means it has no grant row. */
+  readonly child?: { readonly grant: { readonly allowOrchestration: boolean } | undefined };
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+}) {
+  return Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    return yield* Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const now = yield* DateTime.now;
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: input.threadId,
+      });
+      const created = yield* makeThreadCreatedEvent({
+        idAllocator,
+        threadId: input.threadId,
+        now,
+        projectId: forkProjectId,
+      });
+      yield* eventSink.write({
+        events: [
+          input.child === undefined
+            ? created
+            : {
+                ...created,
+                payload: {
+                  ...created.payload,
+                  creationSource: "mcp",
+                  lineage: {
+                    parentThreadId: forkParentThreadId,
+                    relationshipToParent: "subagent",
+                    rootThreadId: forkParentThreadId,
+                  },
+                },
+              },
+        ],
+      });
+      yield* manager.open({
+        threadId: input.threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const config = yield* mcpSessions.read(input.threadId);
+      const resolved = yield* registry.resolve(
+        config?.authorizationHeader.replace(/^Bearer\s+/, "") ?? "",
+      );
+      yield* manager.close(providerSessionId);
+      return resolved?.capabilities;
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 1_000,
+          projectServiceLayer: Layer.mock(ProjectService.ProjectService)({
+            getById: (projectId) =>
+              Effect.succeed(Option.some(makeBrowserAccessProject(projectId))),
+          }),
+          serverSettingsLayer: ServerSettings.layerTest(input.settings ?? {}).pipe(Layer.orDie),
+          delegationGrantsLayer: Layer.mock(DelegationGrants.DelegationGrants)({
+            read: (threadId) =>
+              Effect.succeed(
+                threadId === input.threadId && input.child?.grant !== undefined
+                  ? Option.some({
+                      childThreadId: threadId,
+                      parentThreadId: forkParentThreadId,
+                      depth: 1,
+                      allowOrchestration: input.child.grant.allowOrchestration,
+                      createdAt: "2026-01-01T00:00:00.000Z",
+                    })
+                  : Option.none(),
+              ),
+          }),
+        }),
+      ),
+    );
+  });
+}
+
+const FORK_BITS = ["crossProviderAgents", "delegation", "heartbeat"] as const;
+const forkBitsOf = (capabilities: ReadonlySet<string> | undefined) =>
+  FORK_BITS.filter((capability) => capabilities?.has(capability) === true);
+
+it.effect(
+  "ProviderSessionManagerV2 grants a root thread the agent tools only when access is on",
+  () =>
+    Effect.gen(function* () {
+      const on = yield* mintForkCapabilities({
+        threadId: ThreadId.make("thread-provider-session-manager-fork-root-on"),
+        settings: { enableCrossProviderAgentAccess: true },
+      });
+      assert.deepEqual(forkBitsOf(on), ["crossProviderAgents", "delegation", "heartbeat"]);
+      assert.isTrue(on?.has("orchestration"));
+
+      const off = yield* mintForkCapabilities({
+        threadId: ThreadId.make("thread-provider-session-manager-fork-root-off"),
+      });
+      assert.deepEqual(forkBitsOf(off), ["delegation", "heartbeat"]);
+      assert.isTrue(off?.has("orchestration"));
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 resolves heartbeat access per project", () =>
+  Effect.gen(function* () {
+    const capabilities = yield* mintForkCapabilities({
+      threadId: ThreadId.make("thread-provider-session-manager-fork-heartbeat-off"),
+      settings: {
+        enableCrossProviderAgentAccess: true,
+        projectSettingsOverrides: { [forkProjectId]: { enableHeartbeatAccess: false } },
+      },
+    });
+    assert.deepEqual(forkBitsOf(capabilities), ["crossProviderAgents", "delegation"]);
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 gives delegated children spawn tools only with a grant", () =>
+  Effect.gen(function* () {
+    const settings = { enableCrossProviderAgentAccess: true };
+    const ungranted = yield* mintForkCapabilities({
+      threadId: ThreadId.make("thread-provider-session-manager-fork-child-native"),
+      child: { grant: undefined },
+      settings,
+    });
+    assert.deepEqual(forkBitsOf(ungranted), []);
+    assert.isTrue(ungranted?.has("orchestration"));
+
+    const leaf = yield* mintForkCapabilities({
+      threadId: ThreadId.make("thread-provider-session-manager-fork-child-leaf"),
+      child: { grant: { allowOrchestration: false } },
+      settings,
+    });
+    assert.deepEqual(forkBitsOf(leaf), []);
+
+    const orchestrator = yield* mintForkCapabilities({
+      threadId: ThreadId.make("thread-provider-session-manager-fork-child-orchestrator"),
+      child: { grant: { allowOrchestration: true } },
+      settings,
+    });
+    assert.deepEqual(forkBitsOf(orchestrator), ["crossProviderAgents", "delegation", "heartbeat"]);
+  }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 rotates a reused credential when the cross-provider setting flips",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settings = yield* ServerSettings.ServerSettingsService.pipe(
+        Effect.provide(ServerSettings.layerTest().pipe(Layer.orDie)),
+      );
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-fork-flip");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const original = yield* mcpSessions.read(threadId);
+        const originalToken = original?.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
+        assert.isFalse(
+          (yield* registry.resolve(originalToken))?.capabilities.has("crossProviderAgents"),
+        );
+
+        // Detach keeps the credential alive; the re-attach would normally reuse it.
+        yield* manager.detach({ providerSessionId, threadId, detail: "Workspace changed." });
+        yield* settings.updateSettings({ enableCrossProviderAgentAccess: true });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+
+        const rotated = yield* mcpSessions.read(threadId);
+        assert.notEqual(rotated?.providerSessionId, original?.providerSessionId);
+        assert.isUndefined(yield* registry.resolve(originalToken));
+        const rotatedToken = rotated?.authorizationHeader.replace(/^Bearer\s+/, "") ?? "";
+        assert.isTrue(
+          (yield* registry.resolve(rotatedToken))?.capabilities.has("crossProviderAgents"),
+        );
+        yield* manager.close(providerSessionId);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 1_000,
+            serverSettingsLayer: Layer.succeed(ServerSettings.ServerSettingsService, settings),
+          }),
+        ),
+      );
+    }),
 );
 
 it.effect("ProviderSessionManagerV2 revokes MCP credentials when release persistence fails", () =>

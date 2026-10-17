@@ -46,6 +46,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as DelegationGrants from "./fork/DelegationGrants.ts"; // fork
+import { FORK_MCP_CAPABILITIES, forkMcpCapabilities } from "./fork/ForkMcpCapabilities.ts"; // fork
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -364,7 +366,8 @@ export const layerWithOptions = (
       const agentScope = yield* AgentScope;
       const agentAccessSettings = Effect.fn("ProviderSessionManagerV2.agentAccessSettings")(
         function* (threadId: ThreadId) {
-          if (Option.isNone(serverSettings)) return { browser: true, device: false };
+          if (Option.isNone(serverSettings))
+            return { browser: true, device: false, crossProviderAgents: false, heartbeat: false }; // fork: no settings, no fork access
           return yield* Effect.gen(function* () {
             const settings = yield* serverSettings.value.getSettings;
             const thread = yield* projectionStore.getThread(threadId);
@@ -375,7 +378,11 @@ export const layerWithOptions = (
             const deviceOverridden = entries.some(
               (entry) => entry.enableAgentDeviceAccess !== undefined,
             );
-            if (browserOverridden || deviceOverridden) {
+            // fork: heartbeat access is project-scoped like browser and device access.
+            const heartbeatOverridden = entries.some(
+              (entry) => entry.enableHeartbeatAccess !== undefined,
+            );
+            if (browserOverridden || deviceOverridden || heartbeatOverridden) {
               const project = Option.isSome(projectService)
                 ? yield* projectService.value.getById(thread.projectId)
                 : Option.none();
@@ -383,23 +390,68 @@ export const layerWithOptions = (
                 return {
                   browser: browserOverridden ? false : settings.enableAgentBrowserAccess,
                   device: deviceOverridden ? false : settings.enableAgentDeviceAccess,
+                  crossProviderAgents: settings.enableCrossProviderAgentAccess, // fork
+                  heartbeat: heartbeatOverridden ? false : settings.enableHeartbeatAccess, // fork
                 };
             }
             const effective = resolveProjectSettings(settings, thread.projectId).settings;
             return {
               browser: effective.enableAgentBrowserAccess,
               device: effective.enableAgentDeviceAccess,
+              crossProviderAgents: settings.enableCrossProviderAgentAccess, // fork: environment-wide
+              heartbeat: effective.enableHeartbeatAccess, // fork
             };
           }).pipe(
             Effect.catch((cause) =>
               Effect.logWarning(
                 "Could not resolve agent access; withholding browser and device tools.",
                 { threadId, cause },
-              ).pipe(Effect.as({ browser: false, device: false })),
+              ).pipe(
+                Effect.as({
+                  browser: false,
+                  device: false,
+                  crossProviderAgents: false, // fork
+                  heartbeat: false, // fork
+                }),
+              ),
             ),
           );
         },
       );
+      // fork: delegation grants decide whether a subagent child may delegate. Optional like the
+      // settings above; without them every child counts as ungranted.
+      const delegationGrants = yield* Effect.serviceOption(DelegationGrants.DelegationGrants);
+      const forkCapabilities = Effect.fn("ProviderSessionManagerV2.forkCapabilities")(function* (
+        threadId: ThreadId,
+        providerInstanceId: ProviderInstanceId,
+        access: { readonly crossProviderAgents: boolean; readonly heartbeat: boolean },
+      ) {
+        return yield* Effect.gen(function* () {
+          const thread = yield* projectionStore.getThread(threadId);
+          const grant =
+            thread.lineage.relationshipToParent === "subagent" && Option.isSome(delegationGrants)
+              ? yield* delegationGrants.value.read(threadId)
+              : Option.none();
+          const driver = yield* registry.get(providerInstanceId).pipe(
+            Effect.map((adapter) => adapter.driver),
+            Effect.orElseSucceed(() => undefined),
+          );
+          return forkMcpCapabilities({
+            thread,
+            grantAllowsOrchestration: Option.isSome(grant) && grant.value.allowOrchestration,
+            driver,
+            crossProviderAgentAccess: access.crossProviderAgents,
+            heartbeatAccess: access.heartbeat,
+          });
+        }).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning(
+              "Could not resolve delegation access; withholding delegation, agent and heartbeat tools.",
+              { threadId, cause },
+            ).pipe(Effect.as([])),
+          ),
+        );
+      });
       const layerScope = yield* Effect.scope;
       // Ctrl+C, or a stop that signals the whole process group, reaches the
       // provider CLIs with the server. They report their own background work
@@ -490,13 +542,21 @@ export const layerWithOptions = (
                 // the credential it started with, so a thread that detaches and
                 // re-attaches across a workspace handoff must come back to the
                 // same token or the process's tool calls fail auth.
-                const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
-                  yield* agentAccessSettings(threadId);
+                const access = yield* agentAccessSettings(threadId);
+                const { browser: browserToolsAvailable, device: deviceToolsAvailable } = access;
                 const capabilities = new Set<
                   import("../mcp/McpInvocationContext.ts").McpCapability
                 >(["orchestration", "worktree", "pull-requests"]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
+                // fork: delegation, cross-provider agent and heartbeat bits.
+                for (const capability of yield* forkCapabilities(
+                  threadId,
+                  providerInstanceId,
+                  access,
+                )) {
+                  capabilities.add(capability);
+                }
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
                   // Reserve before the async resolve so a release cannot
@@ -521,7 +581,12 @@ export const layerWithOptions = (
                     // A flipped browser-access setting must not survive through
                     // credential reuse: rotate so the new scope reflects it.
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
-                    resolved.capabilities.has("device") === deviceToolsAvailable
+                    resolved.capabilities.has("device") === deviceToolsAvailable &&
+                    // fork: so does a flipped fork setting or a new grant.
+                    FORK_MCP_CAPABILITIES.every(
+                      (capability) =>
+                        resolved.capabilities.has(capability) === capabilities.has(capability),
+                    )
                   ) {
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }

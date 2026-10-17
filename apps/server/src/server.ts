@@ -62,6 +62,8 @@ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceR
 import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrideSweep.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
+import * as DelegationGrants from "./orchestration-v2/fork/DelegationGrants.ts"; // fork
+import * as DelegationPolicy from "./orchestration-v2/fork/DelegationPolicy.ts"; // fork
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -728,6 +730,8 @@ const layerMakeRoutes = Layer.mergeAll(
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
+    // fork: delegate_task admission (delegation capability, depth cap, child grant rows).
+    Layer.provide(DelegationPolicy.layer.pipe(Layer.provide(DelegationGrants.layer))),
   ),
 ).pipe(
   // Guides read through the same pull request service as every other surface.

@@ -634,6 +634,57 @@ describe("ClaudeAdapterV2 MCP query overrides", () => {
     ]);
   });
 
+  // fork: tools for capabilities the credential lacks are hidden from the model.
+  it("disallows the t3-code tools a credential lacks the fork capability for", () => {
+    const threadId = ThreadId.make("thread-claude-mcp-fork-capabilities");
+    const leaf = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: {
+        ...mcpSessionFor(threadId),
+        capabilities: new Set(["orchestration", "worktree", "pull-requests", "preview"]),
+      },
+      readOnlySandbox: false,
+    });
+    assert.deepEqual(leaf.disallowedTools, [
+      "mcp__t3-code__agent_catalog",
+      "mcp__t3-code__agent_spawn",
+      "mcp__t3-code__agent_wait",
+      "mcp__t3-code__agent_result",
+      "mcp__t3-code__agent_follow_up",
+      "mcp__t3-code__agent_interrupt",
+      "mcp__t3-code__delegate_task",
+      "mcp__t3-code__t3_heartbeat_create",
+      "mcp__t3-code__t3_heartbeat_list",
+      "mcp__t3-code__t3_heartbeat_delete",
+      "mcp__t3-code__t3_heartbeat_wakeup",
+    ]);
+    assert.deepEqual(leaf.allowedTools, [ClaudeAdapterV2.CLAUDE_T3_MCP_TOOL_WILDCARD]);
+
+    const toggleOff = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: {
+        ...mcpSessionFor(threadId),
+        capabilities: new Set(["orchestration", "delegation", "heartbeat"]),
+      },
+      readOnlySandbox: false,
+    });
+    assert.deepEqual(toggleOff.disallowedTools, [
+      "mcp__t3-code__agent_catalog",
+      "mcp__t3-code__agent_spawn",
+      "mcp__t3-code__agent_wait",
+      "mcp__t3-code__agent_result",
+      "mcp__t3-code__agent_follow_up",
+      "mcp__t3-code__agent_interrupt",
+    ]);
+
+    const granted = ClaudeAdapterV2.claudeMcpQueryOverrides({
+      mcpSession: {
+        ...mcpSessionFor(threadId),
+        capabilities: new Set(["orchestration", "crossProviderAgents", "delegation", "heartbeat"]),
+      },
+      readOnlySandbox: false,
+    });
+    assert.isUndefined(granted.disallowedTools);
+  });
+
   it("keys live-query reuse on the MCP-derived pre-approvals", () => {
     const threadId = ThreadId.make("thread-claude-mcp-query-key");
     const mcpSession = mcpSessionFor(threadId);

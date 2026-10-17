@@ -117,6 +117,7 @@ import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codex
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { forkDisabledT3McpToolNames } from "../fork/ForkMcpCapabilities.ts"; // fork
 import {
   MCP_APP_EXTENSION_ID,
   MCP_APP_MIME_TYPE,
@@ -1338,6 +1339,9 @@ export function codexThreadRuntimeParams(input: {
   readonly config: Readonly<Record<string, Schema.Json>>;
 } {
   const { mcpSession } = input;
+  // fork: tools this credential lacks the capability for, hidden from the model.
+  const disabledTools =
+    mcpSession === undefined ? [] : forkDisabledT3McpToolNames(mcpSession.capabilities);
   return {
     ...(input.runtimePolicy?.cwd == null ? {} : { cwd: input.runtimePolicy.cwd }),
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
@@ -1353,6 +1357,7 @@ export function codexThreadRuntimeParams(input: {
                 http_headers: {
                   Authorization: mcpSession.authorizationHeader,
                 },
+                ...(disabledTools.length === 0 ? {} : { disabled_tools: [...disabledTools] }), // fork
               },
             },
           }),
