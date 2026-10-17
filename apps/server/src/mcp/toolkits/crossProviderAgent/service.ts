@@ -3,12 +3,12 @@
  * substrate. Children are native app-owned delegated tasks; this layer keeps the 0.0.45 inputs,
  * outputs and error codes and adds what native lacks: the route allowlist, same-instance
  * refusal, the Claude/Codex driver filter, effort inheritance, the head + tail output cap,
- * multi-child waits and ownership by any ancestor. Depth and the orchestration grant are applied
- * by `DelegationPolicy` inside `OrchestratorMcpService.delegateTask`.
+ * multi-child waits (clamped and rate limited, see `waitGuard.ts`) and ownership by any
+ * ancestor. Depth and the orchestration grant are applied by `DelegationPolicy` inside
+ * `OrchestratorMcpService.delegateTask`.
  */
 import {
   CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS,
-  CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS,
   type CrossProviderAgentCatalogOutput,
   type CrossProviderAgentCatalogRoute,
   type CrossProviderAgentError,
@@ -52,6 +52,7 @@ import {
   resolveCrossProviderEffort,
   threadTitle,
 } from "./policy.ts";
+import { makeWaitRateLimiter, WAIT_RATE_LIMITED_MESSAGE, waitTimeoutMs } from "./waitGuard.ts";
 
 const MAX_OWNERSHIP_HOPS = 32;
 
@@ -150,6 +151,7 @@ const make = Effect.gen(function* () {
   // Optional like DelegationPolicy, so hand-assembled MCP layers keep working; without it every
   // thread reports depth 0. The production composition always provides it.
   const grants = yield* Effect.serviceOption(DelegationGrants.DelegationGrants);
+  const waitRateLimiter = makeWaitRateLimiter();
 
   const readShell = (threadId: ThreadId) =>
     threads.getThreadShell(threadId).pipe(
@@ -447,14 +449,16 @@ const make = Effect.gen(function* () {
     wait: (scope, input) =>
       Effect.gen(function* () {
         const context = yield* callerContext(scope);
+        if (!(yield* waitRateLimiter.admit(context.scope.thread.threadId))) {
+          return yield* fail({ code: "rate_limited", message: WAIT_RATE_LIMITED_MESSAGE });
+        }
         const children: Array<OwnedChild> = [];
         for (const rawChildId of input.childIds) {
           children.push(yield* resolveOwnedChild(context, rawChildId));
         }
-        // Every child waits concurrently under the same deadline. MCP tool calls cannot block
-        // longer than 60 minutes, so that is also the wait without a timeout.
-        const timeoutMs =
-          (input.timeoutSeconds ?? CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS) * 1_000;
+        // Every child waits concurrently under the same clamped deadline: a wait retrieves
+        // results, waiting for time belongs to the heartbeat tools.
+        const timeoutMs = waitTimeoutMs(input.timeoutSeconds);
         yield* Effect.forEach(
           children,
           (child) =>

@@ -32,6 +32,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -779,7 +780,7 @@ describe("cross-provider agent toolkit", () => {
       ),
   );
 
-  it.live("wait bounds its inputs and accepts the 60-minute maximum", () =>
+  it.live("wait bounds its inputs and accepts timeouts above the clamp", () =>
     withEnvironment({}, (_script, cwd) =>
       Effect.gen(function* () {
         const root = yield* seedRoot(cwd);
@@ -945,6 +946,61 @@ describe("cross-provider agent toolkit", () => {
         // A later wait answers from the stored result without any new event.
         const again = yield* waitFor(root, { childIds: [handle.childId], timeoutSeconds: 1 });
         assert.strictEqual(again.children[0]?.settled, true);
+      }),
+    ),
+  );
+
+  it.live("wait never blocks longer than 5 seconds, with or without a longer timeout", () =>
+    withEnvironment({}, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const prompt = "Take your time.";
+        script.gates.set(prompt, yield* Deferred.make<void>());
+        const handle = yield* spawn(root, {
+          providerInstanceId: CODEX,
+          model: "gpt-5.6-sol",
+          prompt,
+        });
+        const startedAt = yield* Clock.currentTimeMillis;
+        const [requested, omitted] = yield* Effect.all(
+          [
+            waitFor(root, { childIds: [handle.childId], timeoutSeconds: 60 }),
+            waitFor(root, { childIds: [handle.childId] }),
+          ],
+          { concurrency: "unbounded" },
+        );
+        const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
+        for (const output of [requested, omitted]) {
+          assert.deepStrictEqual(output.children, [
+            { childId: handle.childId, settled: false, state: "running" },
+          ]);
+        }
+        assert.isAtLeast(elapsedMs, 4_900);
+        assert.isBelow(elapsedMs, 30_000);
+      }),
+    ),
+  );
+
+  it.live("wait refuses an 11th call within a minute, per calling thread", () =>
+    withEnvironment({}, (_script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const other = yield* seedRoot(cwd, { threadId: ThreadId.make("thread:xp-other-root") });
+        for (let call = 0; call < 10; call += 1) {
+          yield* waitFor(root, { childIds: [] });
+        }
+        const refused = failedWith(
+          yield* callTool(root, "agent_wait", { childIds: [] }),
+          "rate_limited",
+        );
+        assert.deepStrictEqual(refused, {
+          error: {
+            code: "rate_limited",
+            message:
+              "Remember that agent_wait is only to retrieve results from a subagent, use the heartbeat tool to wait for a specified period.",
+          },
+        });
+        assert.deepStrictEqual((yield* waitFor(other, { childIds: [] })).children, []);
       }),
     ),
   );
