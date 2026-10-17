@@ -393,6 +393,12 @@ export interface ProjectionStoreV2Shape {
     options: ProjectionTimelinePageOptions,
   ) => Effect.Effect<ProjectionTimelinePage, ProjectionStoreV2Error>;
   readonly getMessageCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
+  // fork: counts one thread's execution nodes of a kind without loading them;
+  // delegated task rows mirror the child's tool_call count.
+  readonly countThreadNodes: (
+    threadId: ThreadId,
+    kind: OrchestrationV2ExecutionNode["kind"],
+  ) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
@@ -4850,6 +4856,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.count ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+    // fork: see countThreadNodes on the shape.
+    const countThreadNodes: ProjectionStoreV2Shape["countThreadNodes"] = (threadId, kind) =>
+      sql<{
+        count: number;
+      }>`SELECT COUNT(*) AS count FROM orchestration_v2_projection_nodes WHERE thread_id = ${threadId} AND kind = ${kind}`.pipe(
+        Effect.map((rows) => rows[0]?.count ?? 0),
+        Effect.mapError(controlReadError(threadId)),
+      );
     const getNextTurnItemOrdinal: ProjectionStoreV2Shape["getNextTurnItemOrdinal"] = (threadId) =>
       sql<{ ordinal: number | null }>`SELECT MAX(ordinal) AS ordinal
         FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}`.pipe(
@@ -6123,6 +6137,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       hasUnpairedRunInterruptRequest,
       isNodeStored,
       getMessageCount,
+      countThreadNodes, // fork
       getNextTurnItemOrdinal,
       getTurnItem,
       getThreadRecords,
@@ -6409,6 +6424,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
       getMessageCount: (threadId) =>
         Ref.get(replayState).pipe(
           Effect.map((state) => state.projections.get(threadId)?.messages.length ?? 0),
+        ),
+      // fork: see countThreadNodes on the shape.
+      countThreadNodes: (threadId, kind) =>
+        Ref.get(replayState).pipe(
+          Effect.map(
+            (state) =>
+              state.projections.get(threadId)?.nodes.filter((node) => node.kind === kind).length ??
+              0,
+          ),
         ),
       getNextTurnItemOrdinal: (threadId) =>
         Ref.get(replayState).pipe(

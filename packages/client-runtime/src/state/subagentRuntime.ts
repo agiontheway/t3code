@@ -10,6 +10,7 @@ import type {
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model"; // fork
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -22,7 +23,8 @@ export type RuntimeSubagentStatus =
   | "interrupted";
 
 export interface SubagentUsage {
-  readonly totalTokens: number;
+  // fork: absent on app-owned task rows until a child turn reports usage ("— tok").
+  readonly totalTokens?: number | undefined;
   readonly inputTokens?: number;
   readonly cachedInputTokens?: number;
   readonly outputTokens?: number;
@@ -131,6 +133,38 @@ function workflowUsage(source: {
   };
 }
 
+// fork: app-owned task rows mirror their child's tokens and tool calls.
+function delegatedTaskUsage(usage: OrchestrationV2Subagent["usage"]): SubagentUsage | null {
+  if (usage === undefined) return null;
+  return {
+    ...(usage.totalTokens === undefined ? {} : { totalTokens: usage.totalTokens }),
+    toolUses: usage.toolUses,
+  };
+}
+
+// fork: the option ids providers use for reasoning effort.
+const SUBAGENT_EFFORT_OPTION_IDS = ["reasoningEffort", "effort", "reasoning", "variant"] as const;
+
+function subagentEffort(selection: OrchestrationV2Subagent["modelSelection"]): string | null {
+  for (const id of SUBAGENT_EFFORT_OPTION_IDS) {
+    const value = getModelSelectionStringOptionValue(selection, id);
+    if (value) return value;
+  }
+  return null;
+}
+
+// fork: compact token totals for agent rows (999, 1.2k, 271k, 1.4M); verbatim from 0.0.45.
+export function formatSubagentTokenCount(totalTokens: number): string {
+  if (totalTokens < 1000) {
+    return `${totalTokens}`;
+  }
+  if (totalTokens < 1_000_000) {
+    const value = totalTokens / 1000;
+    return `${value >= 100 ? Math.round(value) : value.toFixed(1)}k`;
+  }
+  return `${(totalTokens / 1_000_000).toFixed(1)}M`;
+}
+
 function isoFromEpochMillis(value: number | undefined): string | null {
   return value === undefined ? null : DateTime.formatIso(DateTime.makeUnsafe(value));
 }
@@ -205,6 +239,8 @@ export function projectedSubagentsToRuntime(
     readonly title: string | null;
     readonly prompt: string;
     readonly model: string | null;
+    readonly modelSelection?: OrchestrationV2Subagent["modelSelection"];
+    readonly usage?: OrchestrationV2Subagent["usage"];
     readonly status: OrchestrationV2Subagent["status"];
     readonly progress?: string | undefined;
     readonly childThreadId?: string | null | undefined;
@@ -229,10 +265,10 @@ export function projectedSubagentsToRuntime(
         (subagent.prompt.length > 80 ? `${subagent.prompt.slice(0, 77)}...` : subagent.prompt),
       role: null,
       model: subagent.model,
-      effort: null,
+      effort: workflow === undefined ? subagentEffort(subagent.modelSelection) : null, // fork
       status: subagent.status,
       activationCount: 1,
-      usage: workflow === undefined ? null : workflowUsage(workflow),
+      usage: workflow === undefined ? delegatedTaskUsage(subagent.usage) : workflowUsage(workflow), // fork
       progress: subagent.progress ?? null,
       lastToolName: null,
       result: subagent.result,

@@ -11,6 +11,10 @@ import {
   resolveSubagentMetadata,
   subagentDetailPreview,
 } from "@t3tools/client-runtime/state/subagent-display";
+import {
+  formatSubagentTokenCount,
+  type SubagentUsage,
+} from "@t3tools/client-runtime/state/subagentRuntime"; // fork
 import { getModelSelectionStringOptionValue, resolveSelectableModel } from "@t3tools/shared/model";
 import { getTraitsSpeedDisplay, TraitsSpeedIcon } from "./TraitsSpeed";
 import type { ReactNode } from "react";
@@ -41,6 +45,12 @@ export function SubagentTooltipContent(props: {
   providers?: ReadonlyArray<ServerProvider> | undefined;
   driver?: ProviderDriverKind | undefined;
   elapsed?: ReactNode;
+  /**
+   * fork: child telemetry for a plain (non-workflow) task row; `null` when it has
+   * none yet, so app-owned rows show "— tok". Call sites pass `undefined` for
+   * workflow rows, which never show the segment.
+   */
+  usage?: SubagentUsage | null | undefined;
   parentThread?: Pick<OrchestrationV2ThreadShell, "projectId" | "worktreePath"> | undefined;
   childThread?:
     | Pick<OrchestrationV2ThreadShell, "branch" | "worktreePath" | "modelSelection">
@@ -168,7 +178,19 @@ export function SubagentTooltipContent(props: {
           <StatusIcon aria-hidden className="size-3 shrink-0" />
           {props.status.replaceAll("_", " ")}
         </span>
-        {props.elapsed}
+        {/* fork: "<elapsed> · 271k tok · 101 tools" */}
+        {props.usage || (props.usage === null && props.origin === "app_owned") ? (
+          <span className="inline-flex shrink-0 items-center gap-1">
+            {props.elapsed}
+            {props.elapsed ? " · " : null}
+            {props.usage?.totalTokens === undefined
+              ? "— tok"
+              : `${formatSubagentTokenCount(props.usage.totalTokens)} tok`}
+            {props.usage?.toolUses === undefined ? null : ` · ${props.usage.toolUses} tools`}
+          </span>
+        ) : (
+          props.elapsed
+        )}
       </div>
       {metadata.map(({ label, value }) => {
         const Icon = label === "Branch" ? GitBranchIcon : FolderIcon;

@@ -13,12 +13,14 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
+  ProviderTurnId,
   RunId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
@@ -1958,6 +1960,131 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
         projection.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery?.taskIds,
         [child.taskId],
       );
+    }),
+  );
+
+  // fork: the terminal task row mirrors the child's tokens and tool calls,
+  // and a later terminal child turn refreshes them.
+  it.effect("mirrors child token usage and tool calls onto the delegated task row", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:usage-parent");
+      const projectId = ProjectId.make("project:usage-parent");
+      const runId = RunId.make("run:usage-parent");
+      const rootNodeId = NodeId.make("node:usage-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:usage-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const child = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "usage-child",
+        completionWake: "always",
+        continuationPending: false,
+        now,
+      });
+      const providerThreadId = ProviderThreadId.make("provider-thread:usage-child");
+      const providerTurn = (
+        id: string,
+        ordinal: number,
+        status: "running" | "completed",
+        inputTokens: number,
+      ) => ({
+        id: EventId.make(`event:usage-child:turn:${id}:${status}`),
+        type: "provider-turn.updated" as const,
+        threadId: child.childThreadId,
+        occurredAt: now,
+        payload: {
+          id: ProviderTurnId.make(`provider-turn:usage-child:${id}`),
+          providerThreadId,
+          nodeId: NodeId.make(`node:usage-child:turn:${id}`),
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal,
+          status,
+          startedAt: now,
+          completedAt: status === "completed" ? now : null,
+          turnTokenUsage: {
+            usageScope: "main_agent" as const,
+            usageStatus: "complete" as const,
+            hasSubagents: false,
+            inputTokens,
+            cachedInputTokens: 100,
+            outputTokens: 20,
+          },
+        },
+      });
+      // A running turn does not wake the live refresh, so recovery alone writes usage.
+      yield* eventSink.write({
+        commandId: CommandId.make("command:usage-child:telemetry"),
+        events: [
+          providerTurn("one", 1, "running", 1000),
+          {
+            id: EventId.make("event:usage-child:tool"),
+            type: "node.updated",
+            threadId: child.childThreadId,
+            occurredAt: now,
+            payload: {
+              id: NodeId.make("node:usage-child:tool"),
+              threadId: child.childThreadId,
+              runId: child.childRunId,
+              parentNodeId: null,
+              rootNodeId: NodeId.make("node:usage-child:root"),
+              kind: "tool_call",
+              status: "completed",
+              countsForRun: true,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt: now,
+              completedAt: now,
+            },
+          },
+        ],
+      });
+
+      yield* orchestrator.recoverDelegatedTasks;
+
+      const settled = yield* orchestrator.getThreadProjection(threadId);
+      const task = settled.subagents.find((row) => row.id === child.taskId);
+      assert.equal(task?.status, "cancelled");
+      assert.deepEqual(task?.usage, { totalTokens: 1120, toolUses: 1 });
+
+      const after = yield* eventSink.latestSequence();
+      const refreshed = yield* eventSink
+        .stream({ afterSequence: after, eventType: "subagent.updated" })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" && stored.event.payload.id === child.taskId,
+          ),
+          Stream.take(1),
+          Stream.runHead,
+          Effect.forkChild,
+        );
+      yield* eventSink.write({
+        commandId: CommandId.make("command:usage-child:second-turn"),
+        events: [providerTurn("two", 2, "completed", 2000)],
+      });
+      const event = yield* Fiber.join(refreshed);
+      assert.isTrue(event._tag === "Some" && event.value.event.type === "subagent.updated");
+      const row = (yield* orchestrator.getThreadProjection(threadId)).subagents.find(
+        (candidate) => candidate.id === child.taskId,
+      );
+      assert.equal(row?.status, "cancelled");
+      assert.deepEqual(row?.usage, { totalTokens: 3240, toolUses: 1 });
     }),
   );
 });

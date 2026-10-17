@@ -234,6 +234,34 @@ it.effect.each(["sqlite", "memory"] as const)(
       );
       assert.equal(yield* store.getNextTurnItemOrdinal(threadId), storage === "sqlite" ? 3 : 2);
       assert.equal(yield* store.getMessageCount(threadId), storage === "sqlite" ? 2 : 1);
+      // fork: delegated task rows count the child's tool_call nodes.
+      assert.equal(yield* store.countThreadNodes(threadId, "tool_call"), 0);
+      yield* store.apply({
+        id: EventId.make("startup:tool-event"),
+        type: "node.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: NodeId.make("startup:tool"),
+          threadId,
+          runId,
+          parentNodeId: run.rootNodeId!,
+          rootNodeId: run.rootNodeId!,
+          kind: "tool_call",
+          status: "completed",
+          countsForRun: true,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+      assert.equal(yield* store.countThreadNodes(threadId, "tool_call"), 1);
+      assert.equal(yield* store.countThreadNodes(threadId, "root_turn"), 1);
+      assert.equal(yield* store.countThreadNodes(ThreadId.make("other"), "tool_call"), 0);
       assert.deepEqual(
         (yield* store.getThreadRecords(threadId, ["messages"], {
           messageRunIds: [runId],

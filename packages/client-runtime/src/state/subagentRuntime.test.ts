@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { OrchestrationV2Subagent, OrchestrationV2SubagentWorkflow } from "@t3tools/contracts";
+import {
+  ProviderInstanceId,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2SubagentWorkflow,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { deriveWorkflowGroups, projectedSubagentsToRuntime } from "./subagentRuntime.ts";
+import {
+  deriveWorkflowGroups,
+  formatSubagentTokenCount,
+  projectedSubagentsToRuntime,
+} from "./subagentRuntime.ts";
 
 const at = (iso: string) => DateTime.makeUnsafe(iso);
 
@@ -216,5 +224,41 @@ describe("deriveWorkflowGroups over a dynamic workflow", () => {
     expect(groups[0]?.unphasedMembers.map((agent) => agent.title)).toEqual(["alpha:one"]);
     expect(groups[1]?.phases).toEqual([]);
     expect(groups[1]?.unphasedMembers).toEqual([]);
+  });
+});
+
+// fork: app-owned task rows carry their child's telemetry and effort.
+describe("projectedSubagentsToRuntime delegated task telemetry", () => {
+  it("maps mirrored usage, keeping an unknown token total distinct from zero", () => {
+    const [counted, unknown, absent] = projectedSubagentsToRuntime([
+      subagent({ id: "a", usage: { totalTokens: 271_000, toolUses: 101 } }),
+      subagent({ id: "b", usage: { toolUses: 3 } }),
+      subagent({ id: "c" }),
+    ]);
+    expect(counted?.usage).toEqual({ totalTokens: 271_000, toolUses: 101 });
+    expect(unknown?.usage).toEqual({ toolUses: 3 });
+    expect(unknown?.usage?.totalTokens).toBeUndefined();
+    expect(absent?.usage).toBeNull();
+  });
+
+  it("derives effort from the task's model selection", () => {
+    const selection = (id: string, value: string) => ({
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.4",
+      options: [{ id, value }],
+    });
+    const rows = projectedSubagentsToRuntime([
+      subagent({ id: "a", modelSelection: selection("reasoningEffort", "high") }),
+      subagent({ id: "b", modelSelection: selection("variant", "max") }),
+      subagent({ id: "c", modelSelection: selection("fastMode", "on") }),
+      subagent({ id: "d" }),
+    ]);
+    expect(rows.map((row) => row.effort)).toEqual(["high", "max", null, null]);
+  });
+
+  it("formats token totals compactly", () => {
+    expect(
+      [0, 999, 1_000, 12_345, 271_000, 999_999, 1_400_000].map(formatSubagentTokenCount),
+    ).toEqual(["0", "999", "1.0k", "12.3k", "271k", "1000k", "1.4M"]);
   });
 });

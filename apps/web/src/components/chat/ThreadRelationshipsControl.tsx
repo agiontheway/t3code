@@ -512,6 +512,7 @@ export function ThreadRelationshipsPanel(props: {
                   providers={providers}
                   driver={providerDriver}
                   elapsed={<AgentElapsed agent={agent} />}
+                  usage={workflowGroup ? undefined : agent.usage} // fork
                   status={agent.status}
                   result={agent.result}
                   progress={agent.progress}

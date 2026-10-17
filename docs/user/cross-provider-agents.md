@@ -4,9 +4,10 @@ A Claude or Codex thread can hand work to a child thread on one of your _other_ 
 providers: a Claude orchestrator can delegate to your Codex subscription, and a Codex thread can
 delegate to Claude. Each child is an ordinary thread in the same project, worktree, and branch, and
 appears under **Thread details → Lineage** on the parent while it runs, with its status, elapsed
-time, model and effort. Delegating inside one provider keeps using T3 Code's native
-`delegate_task` tool, which stays available alongside; this feature only covers crossing
-providers.
+time, model and effort. Hovering its row also shows the tokens and tool calls the child has used
+so far (`— tok` until its provider reports usage). Delegating inside one provider keeps using T3
+Code's native `delegate_task` tool, which stays available alongside; this feature only covers
+crossing providers.
 
 Children do not appear in the thread list, search, the command palette, or the mobile home screen.
 Open one by clicking its row under **Lineage** on the parent; it is a normal thread from there, and

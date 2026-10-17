@@ -144,6 +144,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import * as ServerSettings from "../serverSettings.ts";
 import * as AliasCompletionPayload from "./fork/AliasCompletionPayload.ts"; // fork
 import { DelegationGrants } from "./fork/DelegationGrants.ts"; // fork
+import { delegatedTaskUsage, sameDelegatedTaskUsage } from "./fork/DelegatedTaskUsage.ts"; // fork
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -7028,6 +7029,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       completionDelivery: { state: "pending", observedByRunId: null },
       status: run.status === "queued" ? "pending" : "running",
       progress: undefined,
+      usage: undefined, // fork: a follow-up task starts without the original's telemetry
       result: null,
       startedAt: now,
       completedAt: null,
@@ -10319,8 +10321,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const parentTurnItem = parentProjection.turnItems.find(
         (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
       );
+      // fork: the terminal row carries the child's token and tool-call totals.
+      const usage =
+        task.workflow === undefined
+          ? delegatedTaskUsage({
+              providerTurns: childControls.providerTurns,
+              toolCallCount: yield* projectionStore.countThreadNodes(childThreadId, "tool_call"),
+            })
+          : undefined;
       const updatedTask: OrchestrationV2Subagent = {
         ...task,
+        ...(usage === undefined ? {} : { usage }),
         providerThreadId: childRun.providerThreadId,
         status: terminalStatus,
         result: result.text,
@@ -10514,6 +10525,44 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (completionPlan.offer && completionPlan.parentRun !== undefined) {
         yield* offerDelegatedCompletionDelivery(parentThreadId, completionPlan.parentRun.id);
       }
+    });
+
+  /**
+   * fork: mirrors a child's token and tool-call totals onto its app-owned task
+   * rows after each terminal child turn. Writes the parent thread, so callers
+   * hold the parent's dispatch lock, as for finalize; unchanged rows are skipped.
+   */
+  const refreshAppOwnedSubagentUsage = (childThreadId: ThreadId, parentThreadId: ThreadId) =>
+    Effect.gen(function* () {
+      const parent = yield* projectionStore.getThreadRecords(parentThreadId, ["subagents"]);
+      const tasks = parent.subagents.filter(
+        (task) =>
+          task.origin === "app_owned" &&
+          task.childThreadId === childThreadId &&
+          task.workflow === undefined,
+      );
+      if (tasks.length === 0) return;
+      const { providerTurns } = yield* projectionStore.getThreadRecords(childThreadId, [
+        "providerTurns",
+      ]);
+      const usage = delegatedTaskUsage({
+        providerTurns,
+        toolCallCount: yield* projectionStore.countThreadNodes(childThreadId, "tool_call"),
+      });
+      const changed = tasks.filter((task) => !sameDelegatedTaskUsage(task.usage, usage));
+      if (changed.length === 0) return;
+      const now = yield* DateTime.now;
+      yield* writeSystemEvents(
+        changed.map((task) => ({
+          type: "subagent.updated" as const,
+          threadId: parentThreadId,
+          ...(task.runId === null ? {} : { runId: task.runId }),
+          nodeId: task.id,
+          driver: task.driver,
+          occurredAt: now,
+          payload: { ...task, usage, updatedAt: now },
+        })),
+      );
     });
 
   const finalizeAppOwnedSubagent = (
@@ -11471,6 +11520,40 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             stored.event.payload.status === "rolled_back"),
       ),
       Stream.runForEach(handleTerminalRun),
+      Effect.forkDetach,
+    );
+
+  // fork: a terminal child turn refreshes its app-owned task rows' usage.
+  yield* eventSink
+    .stream({ afterSequence: terminalEventsAfterSequence, eventType: "provider-turn.updated" })
+    .pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "provider-turn.updated" &&
+          (stored.event.payload.status === "completed" ||
+            stored.event.payload.status === "interrupted" ||
+            stored.event.payload.status === "failed" ||
+            stored.event.payload.status === "cancelled"),
+      ),
+      Stream.runForEach((stored) =>
+        Effect.gen(function* () {
+          const childThreadId = stored.event.threadId;
+          const parentThreadId = yield* appOwnedSubagentParentThreadId(childThreadId);
+          if (parentThreadId === undefined) return;
+          yield* threadDispatch.withLock(
+            parentThreadId,
+            refreshAppOwnedSubagentUsage(childThreadId, parentThreadId),
+          );
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to refresh delegated task usage", {
+              threadId: stored.event.threadId,
+              sequence: stored.sequence,
+              cause,
+            }),
+          ),
+        ),
+      ),
       Effect.forkDetach,
     );
 

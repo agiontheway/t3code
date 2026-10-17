@@ -780,6 +780,15 @@ export const OrchestrationV2Subagent = Schema.Struct({
   progress: Schema.optional(Schema.String),
   /** Present only on a workflow coordinator task; absent on ordinary subagents. */
   workflow: Schema.optional(OrchestrationV2SubagentWorkflow),
+  // fork: child telemetry mirrored onto app-owned task rows. totalTokens is
+  // absent until a child turn reports usage; absent entirely on provider-native
+  // tasks and legacy rows.
+  usage: Schema.optional(
+    Schema.Struct({
+      totalTokens: Schema.optional(NonNegativeInt),
+      toolUses: NonNegativeInt,
+    }),
+  ),
   result: Schema.NullOr(Schema.String),
   startedAt: Schema.NullOr(Schema.DateTimeUtc),
   completedAt: Schema.NullOr(Schema.DateTimeUtc),

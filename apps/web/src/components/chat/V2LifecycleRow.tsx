@@ -498,6 +498,8 @@ function SubagentTimelineLink(props: {
           elapsed={agent ? <AgentElapsed agent={projectedSubagentsToRuntime([agent])[0]!} /> : null}
           model={agent?.model ?? null}
           modelSelection={agent?.modelSelection}
+          // fork: null marks a plain task row with no telemetry yet.
+          usage={agent == null || agent.workflow !== undefined ? undefined : (agent.usage ?? null)}
           status={liveStatus}
           result={agent?.result ?? props.result}
           progress={agent?.progress ?? props.progress}
@@ -511,6 +513,7 @@ function SubagentTimelineTooltip(
   props: Parameters<typeof SubagentTimelineLink>[0] & {
     model: string | null;
     modelSelection: OrchestrationV2Subagent["modelSelection"];
+    usage: OrchestrationV2Subagent["usage"] | null; // fork
     elapsed: ReactNode;
   },
 ) {
@@ -534,6 +537,7 @@ function SubagentTimelineTooltip(
       providers={props.providers}
       driver={props.driver}
       elapsed={props.elapsed}
+      usage={props.usage} // fork
       status={props.status}
       result={props.result}
       progress={props.progress}

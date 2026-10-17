@@ -1272,3 +1272,69 @@ it.each(["source", "target"])(
     }
   },
 );
+
+// fork: app-owned task rows mirror their child's tokens and tool calls.
+it("shows delegated task token and tool counts in the agent tooltip", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  state.showTooltips = true;
+  const child = {
+    id: "child",
+    title: "Worker",
+    lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+  };
+  state.shells = [{ environmentId: "test", source: child }];
+  const task = {
+    id: "agent",
+    threadId: "parent",
+    runId: null,
+    childThreadId: "child",
+    origin: "app_owned",
+    driver: "codex",
+    providerInstanceId: "codex",
+    title: "Worker",
+    prompt: "Check",
+    model: "gpt-5.4",
+    status: "running",
+    result: null,
+    startedAt: DateTime.makeUnsafe("2026-09-16T12:00:00Z"),
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe("2026-09-16T12:01:00Z"),
+  };
+  const project = (usage: unknown, origin = "app_owned") => ({
+    thread: { id: "parent", lineage: {}, activeProviderThreadId: null },
+    runs: [],
+    providerThreads: [],
+    providerSessions: [],
+    contextTransfers: [],
+    subagents: [{ ...task, origin, ...(usage === undefined ? {} : { usage }) }],
+  });
+  const panel = (
+    <ThreadRelationshipsPanel
+      environmentId={EnvironmentId.make("test")}
+      threadId={ThreadId.make("parent")}
+    />
+  );
+  const text = () => {
+    const read = (node: ReactTestInstance | string): string =>
+      typeof node === "string" ? node : node.children.map(read).join("");
+    return read(renderer.root);
+  };
+  state.projection = project({ totalTokens: 271_000, toolUses: 101 });
+  await act(async () => {
+    renderer = create(panel);
+  });
+  expect(text()).toContain("271k tok · 101 tools");
+  state.projection = project({ toolUses: 4 });
+  await act(async () => renderer.update(cloneElement(panel)));
+  expect(text()).toContain("— tok · 4 tools");
+  // A new app-owned task has no telemetry yet; its total is still unknown.
+  state.projection = project(undefined);
+  await act(async () => renderer.update(cloneElement(panel)));
+  expect(text()).toContain("— tok");
+  expect(text()).not.toContain(" tools");
+  // Provider-native subagents never show the segment.
+  state.projection = project(undefined, "provider_native");
+  await act(async () => renderer.update(cloneElement(panel)));
+  expect(text()).not.toContain(" tok");
+  expect(text()).not.toContain(" tools");
+});
