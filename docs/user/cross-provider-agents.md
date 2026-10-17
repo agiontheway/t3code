@@ -33,8 +33,10 @@ a delegated task may consume the other provider's paid quota.
 
 ## Choosing who can be a target
 
-By default every enabled Claude and Codex instance is a target with all of its models, including
-API-key-backed instances; only an instance that is explicitly signed out is left out.
+By default every Claude and Codex instance that is enabled, installed and currently available is a
+target with all of its models, including API-key-backed instances whose sign-in status is unknown.
+An instance is left out while it is signed out, not installed, unavailable or unable to run child
+tasks, and for threads in a project that has the instance turned off.
 Select one connected environment and expand **Routes** to switch its instances off or limit the
 models an agent may pick. **Restore defaults** discards your edits and goes back to tracking your
 provider list.
