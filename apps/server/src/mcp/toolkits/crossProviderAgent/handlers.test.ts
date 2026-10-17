@@ -508,20 +508,25 @@ const failedWith = (
   return output;
 };
 
-function waitForProjection(
+/**
+ * Resolves once the thread's projection satisfies `predicate`. Projections commit with their
+ * events, so the projection is re-read on each event the thread records after the cursor.
+ */
+const awaitProjection = (
   threadId: ThreadId,
   predicate: (projection: OrchestrationV2ThreadProjection) => boolean,
-) {
-  return Effect.gen(function* () {
+) =>
+  Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    for (let attempt = 0; attempt < 1_000; attempt += 1) {
-      const projection = yield* orchestrator.getThreadProjection(threadId);
-      if (predicate(projection)) return projection;
-      yield* Effect.sleep("5 millis");
-    }
-    return yield* Effect.die(new Error(`Timed out waiting for thread ${threadId}.`));
+    const afterSequence = yield* orchestrator.getThreadEventSequence(threadId);
+    const holds = Effect.map(orchestrator.getThreadProjection(threadId), predicate);
+    if (yield* holds) return;
+    yield* orchestrator.streamStoredEventsFrom({ threadId, afterSequence }).pipe(
+      Stream.mapEffect(() => holds),
+      Stream.filter((satisfied) => satisfied),
+      Stream.runHead,
+    );
   });
-}
 
 /** A top-level thread whose own turn stays running, so it may act as a caller. */
 const seedRoot = (
@@ -566,7 +571,7 @@ const seedRoot = (
   });
 
 const waitUntilRunning = (threadId: ThreadId) =>
-  waitForProjection(threadId, (projection) =>
+  awaitProjection(threadId, (projection) =>
     projection.providerTurns.some((turn) => turn.status === "running"),
   );
 
@@ -1067,7 +1072,7 @@ describe("cross-provider agent toolkit", () => {
   it.live(
     "ownership follows the spawn chain: ancestors may act, siblings and strangers may not",
     () =>
-      withEnvironment({}, (_script, cwd) =>
+      withEnvironment({}, (script, cwd) =>
         Effect.gen(function* () {
           const root = yield* seedRoot(cwd);
           const stranger = yield* seedRoot(cwd, { threadId: ThreadId.make("thread:xp-stranger") });
@@ -1137,6 +1142,31 @@ describe("cross-provider agent toolkit", () => {
           assert.deepStrictEqual(viaGrandparent, { childId: grandchildId, status: "interrupting" });
           const settled = yield* waitFor(root, { childIds: [grandchildId] });
           assert.strictEqual(settled.children[0]?.state, "interrupted");
+
+          // A grandparent's follow-up is a fresh task under the child's direct parent, so wait
+          // and result report the new turn, not the interrupted one.
+          script.responses.set("Grandparent asks again.", "grandparent answer");
+          succeeded(
+            yield* callTool(root, "agent_follow_up", {
+              childId: grandchildId,
+              prompt: "Grandparent asks again.",
+            }),
+          );
+          const followed = yield* waitFor(root, { childIds: [grandchildId] });
+          assert.deepInclude(followed.children[0], {
+            settled: true,
+            state: "completed",
+            output: "grandparent answer",
+          });
+          const result = succeeded<CrossProviderAgentResultOutput>(
+            yield* callTool(root, "agent_result", { childId: grandchildId }),
+          );
+          assert.strictEqual(result.output, "grandparent answer");
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const subTasks = (yield* orchestrator.getThreadProjection(subId)).subagents.filter(
+            (task) => task.childThreadId === grandchildId,
+          );
+          assert.strictEqual(subTasks.length, 2);
         }),
       ),
   );

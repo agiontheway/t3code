@@ -186,6 +186,9 @@ export interface OrchestratorMcpServiceShape {
   readonly sendToThread: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadSendInput,
+    // fork: set by agent_follow_up, which an ancestor may call. A send records a follow-up task
+    // only when it comes from the child's direct parent, so it is sent on that parent's behalf.
+    fork?: { readonly senderThreadId: ThreadId },
   ) => Effect.Effect<OrchestratorMcpThreadSendResult, OrchestratorMcpFailure>;
   readonly waitForThread: (
     scope: McpInvocationScope,
@@ -2628,7 +2631,7 @@ const make = Effect.gen(function* () {
           hasMore: timeline.hasMore,
         } satisfies OrchestratorMcpThreadReadResult;
       }),
-    sendToThread: (scope, input) =>
+    sendToThread: (scope, input, fork) =>
       Effect.gen(function* () {
         const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
         yield* assertLiveCallerForOtherThread(scope, parent, target);
@@ -2651,7 +2654,9 @@ const make = Effect.gen(function* () {
               operation: "thread-send",
             }),
             threadId: input.threadId,
-            ...(parent === undefined ? {} : { senderThreadId: parent.thread.id }),
+            ...(parent === undefined
+              ? {}
+              : { senderThreadId: fork?.senderThreadId ?? parent.thread.id }), // fork
             messageId,
             text: input.message,
             attachments: [],

@@ -538,15 +538,20 @@ const make = Effect.gen(function* () {
             childId: child.childThreadId,
           });
         }
-        // A send to a settled app-owned child starts a fresh task whose completion wakes its
-        // parent. The key collapses concurrent duplicates of the same follow-up to one turn.
+        // A send to a settled app-owned child from its direct parent starts a fresh task whose
+        // completion wakes that parent, so an ancestor sends on the parent's behalf. The key
+        // collapses concurrent duplicates of the same follow-up to one turn.
         yield* orchestrator
-          .sendToThread(context.scope, {
-            threadId: child.childThreadId,
-            message: input.prompt,
-            mode: "queue",
-            clientRequestId: `agent-follow-up:${child.taskId}:${Hash.string(input.prompt)}`,
-          })
+          .sendToThread(
+            context.scope,
+            {
+              threadId: child.childThreadId,
+              message: input.prompt,
+              mode: "queue",
+              clientRequestId: `agent-follow-up:${child.taskId}:${Hash.string(input.prompt)}`,
+            },
+            { senderThreadId: child.parentThreadId },
+          )
           .pipe(Effect.catch(fromNative({ childId: child.childThreadId })));
         return { childId: child.childThreadId, status: "running" as const };
       }),
