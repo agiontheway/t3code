@@ -19,6 +19,7 @@ import * as Stream from "effect/Stream";
 
 import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
 import { DelegationGrants } from "../orchestration-v2/fork/DelegationGrants.ts";
+import { startIfIdleFenceCommandTypes } from "../orchestration-v2/fork/StartIfIdleAdmission.ts";
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import { OrchestrationCommandReceiptRepository } from "../persistence/OrchestrationCommandReceipts.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -125,6 +126,22 @@ export const make = Effect.gen(function* () {
         ),
       );
 
+  // The admission fence refuses every job armed at or before the latest
+  // accepted Stop, so after a rejection those jobs are removed with the same
+  // inclusive rule; otherwise a recurring job armed at an event-carrying
+  // Stop's own sequence would fail on every occurrence.
+  const fencedByStop = (occurrence: ReservedHeartbeatOccurrence) =>
+    receipts
+      .latestAcceptedSequence({
+        threadId: occurrence.threadId,
+        commandTypes: startIfIdleFenceCommandTypes(["stop"]),
+      })
+      .pipe(
+        Effect.map((sequence) =>
+          sequence !== null && sequence >= occurrence.originSequence ? sequence + 1 : undefined,
+        ),
+      );
+
   const cancelAfterStop = (threadId: ThreadId, sequence: number) =>
     scheduler
       .cancelThread(threadId, "session stopped", sequence)
@@ -201,10 +218,11 @@ export const make = Effect.gen(function* () {
       if (tag !== undefined && DEFINITE_REJECTIONS.has(tag)) {
         yield* outcomeForOccurrence(occurrence, { status: "failed" });
         // A fence rejection means a Stop landed since this job was armed. When
-        // that Stop wrote no event, nothing else removes the thread's jobs.
-        const stoppedAt = yield* stoppedSince(occurrence).pipe(
-          Effect.orElseSucceed(() => undefined),
-        );
+        // that Stop wrote no event, or tied the job's origin, nothing else
+        // removes the thread's jobs.
+        const stoppedAt = yield* Effect.gen(function* () {
+          return (yield* fencedByStop(occurrence)) ?? (yield* stoppedSince(occurrence));
+        }).pipe(Effect.orElseSucceed(() => undefined));
         if (stoppedAt !== undefined) yield* cancelAfterStop(occurrence.threadId, stoppedAt);
         return "complete";
       }

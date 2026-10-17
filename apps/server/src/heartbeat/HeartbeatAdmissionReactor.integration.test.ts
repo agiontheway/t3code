@@ -236,6 +236,33 @@ it.effect("a Stop that wrote no event cancels the thread's jobs instead of deliv
   }).pipe(Effect.provide(layerOrchestration)),
 );
 
+it.effect(
+  "a job armed at an event-carrying Stop's sequence is removed after the fence refuses it",
+  () =>
+    Effect.gen(function* () {
+      const { reactor, recorded } = yield* makeReactor;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("thread:heartbeat-admission:stop-tie");
+      yield* createThread(threadId);
+      yield* sendUserMessage(threadId, "active");
+      const stopped = yield* orchestrator.dispatch({
+        type: "thread.stop",
+        commandId: CommandId.make("stop:heartbeat-admission:tie"),
+        threadId,
+      });
+      assert.isAbove(stopped.storedEvents.length, 0);
+
+      // Armed at the Stop's last event, which is still the thread head.
+      const occurrence = yield* armed(threadId, "stop-tie", "cron");
+      assert.equal(occurrence.originSequence, stopped.sequence);
+      assert.equal(yield* reactor.attemptReserved(occurrence), "complete");
+      assert.deepEqual(yield* Ref.get(recorded), [
+        { method: "outcome", outcome: { status: "failed" } },
+        { method: "cancelThread", beforeSequence: occurrence.originSequence + 1 },
+      ]);
+    }).pipe(Effect.provide(layerOrchestration)),
+);
+
 it.effect("the events of an interrupt and of a Stop cancel relative and all schedules", () =>
   Effect.gen(function* () {
     const { reactor, recorded } = yield* makeReactor;

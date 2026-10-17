@@ -84,6 +84,8 @@ const makeAdmission = (
     readonly cancellationSequences?: ReadonlyArray<number | undefined>;
     readonly enabled?: boolean;
     readonly receipts?: Readonly<Record<string, { commandType: string; status?: string }>>;
+    /** The latest accepted thread.stop receipt's result sequence, as the fence reads it. */
+    readonly stopReceiptSequence?: number;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -130,6 +132,7 @@ const makeAdmission = (
       }),
       Layer.mock(EventSinkV2)({}),
       Layer.mock(OrchestrationCommandReceiptRepository)({
+        latestAcceptedSequence: () => Effect.succeed(options.stopReceiptSequence ?? null),
         getByCommandId: ({ commandId }) => {
           const receipt = options.receipts?.[commandId];
           return Effect.succeed(
@@ -476,6 +479,37 @@ it.effect("cleans up the thread's schedules when the fence rejects a Stop it rac
       },
     ]);
   }),
+);
+
+it.effect(
+  "removes a job armed at an event-carrying Stop's own sequence once the fence refuses it",
+  () =>
+    Effect.gen(function* () {
+      const { service, outcomes, calls } = yield* makeAdmission(
+        (command) =>
+          Effect.fail(
+            new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause: `start_if_idle fence: thread was stopped or interrupted at sequence ${ORIGIN}, not before ${ORIGIN}.`,
+            }),
+          ),
+        // The Stop wrote events ending at the origin: the restore rule keeps the
+        // job, but the inclusive fence refuses it on every occurrence.
+        { cancellationSequences: [ORIGIN], stopReceiptSequence: ORIGIN },
+      );
+
+      yield* service.processReserved({ ...occurrence, kind: "cron" });
+      assert.deepStrictEqual(yield* Ref.get(outcomes), [{ status: "failed" }]);
+      assert.deepStrictEqual(yield* Ref.get(calls), [
+        {
+          method: "cancelThread",
+          threadId: THREAD_ID,
+          reason: "session stopped",
+          beforeSequence: ORIGIN + 1,
+        },
+      ]);
+    }),
 );
 
 it.effect("reactivates on a normal user message but never on a heartbeat or agent message", () =>
