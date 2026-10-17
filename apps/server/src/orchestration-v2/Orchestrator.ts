@@ -4612,11 +4612,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandTypes: startIfIdleFenceCommandTypes(mode.fence.kinds),
           })
           .pipe(mapDispatchError(command));
-        if (fencedAt !== null && fencedAt > mode.fence.afterSequence) {
+        // A Stop with nothing to end records the thread's current sequence, so
+        // one at the armed sequence itself cannot be proven earlier: it fences.
+        // Arming happens inside a run, whose events follow any earlier Stop.
+        if (fencedAt !== null && fencedAt >= mode.fence.afterSequence) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: `start_if_idle fence: thread was stopped or interrupted at sequence ${fencedAt}, after ${mode.fence.afterSequence}.`,
+            cause: `start_if_idle fence: thread was stopped or interrupted at sequence ${fencedAt}, not before ${mode.fence.afterSequence}.`,
           });
         }
       }

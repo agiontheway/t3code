@@ -2984,7 +2984,7 @@ export const OrchestrationV2Command = Schema.Union([
       Schema.Struct({ type: Schema.Literal("start_immediately") }),
       // fork: server-only admission for heartbeat and Signal. Starts like
       // start_immediately on an idle thread and never queues behind a busy one;
-      // `fence` refuses the start after an accepted Stop/interrupt past that sequence.
+      // `fence` refuses the start after an accepted Stop/interrupt at or past that sequence.
       Schema.Struct({
         type: Schema.Literal("start_if_idle"),
         fence: Schema.optional(

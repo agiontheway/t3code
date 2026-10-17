@@ -312,6 +312,32 @@ it.effect("an interrupt fence rejects a stale relative wakeup with a receipt", (
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("a Stop that ends nothing still fences a wakeup armed at that sequence", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const events = yield* EventStore.EventStoreV2;
+    const threadId = ThreadId.make("thread:start-if-idle:idle-stop");
+    yield* createThread(threadId);
+    const armedAt = yield* events.latestSequence({ threadId });
+    const stopped = yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop:start-if-idle:idle"),
+      threadId,
+    });
+    assert.lengthOf(stopped.storedEvents, 0);
+    assert.equal(stopped.sequence, armedAt);
+
+    const stale = heartbeat(threadId, "idle-stop-stale", {
+      afterSequence: armedAt,
+      kinds: ["stop"],
+    });
+    const error = yield* orchestrator.dispatch(stale).pipe(Effect.flip);
+    assert.equal(error._tag, "OrchestratorDispatchError");
+    assert.equal((yield* receiptFor(stale.commandId))?.status, "rejected");
+    assert.deepEqual(yield* runStatuses(threadId), []);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("a stop fence holds across an ordinary user turn after the Stop", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
