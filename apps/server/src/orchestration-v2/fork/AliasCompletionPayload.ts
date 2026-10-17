@@ -39,8 +39,10 @@ export function aliasCompletionPayload(
 }
 
 /**
- * Appends each alias-owned task's payload to the native wake text. Any failure to read the
- * grants or settings leaves the native text, which still tells the parent how to read results.
+ * Appends each alias-owned task's payload to the native wake text while cross-provider agent
+ * access is enabled; with access off the parent cannot call `agent_result`, so the native text
+ * (which points at `task_status`) is kept. Any failure to read the grants or settings leaves the
+ * native text too.
  */
 export const makeCompletionWakeText =
   (input: {
@@ -54,6 +56,8 @@ export const makeCompletionWakeText =
     if (Option.isNone(input.grants)) return Effect.succeed(nativeText);
     const grants = input.grants.value;
     return Effect.gen(function* () {
+      const settings = yield* input.serverSettings.getSettings;
+      if (!settings.enableCrossProviderAgentAccess) return nativeText;
       const owned: Array<OrchestrationV2Subagent & { readonly childThreadId: string }> = [];
       for (const task of tasks) {
         if (task === undefined || task.childThreadId === null) continue;
@@ -62,7 +66,7 @@ export const makeCompletionWakeText =
         }
       }
       if (owned.length === 0) return nativeText;
-      const cap = (yield* input.serverSettings.getSettings).crossProviderAgentOutputCapChars;
+      const cap = settings.crossProviderAgentOutputCapChars;
       return [nativeText, ...owned.map((task) => aliasCompletionPayload(task, cap))].join("\n\n");
     }).pipe(
       Effect.catch((cause) =>

@@ -51,11 +51,14 @@ const task = (
   updatedAt: DateTime.makeUnsafe("2026-10-17T00:00:00.000Z"),
 });
 
-const layerStored = (cap: number) =>
+const layerStored = (cap: number, enableCrossProviderAgentAccess = true) =>
   Layer.mergeAll(
     DelegationGrants.layer,
     Layer.effectDiscard(Effect.andThen(DelegationGrantsMigration, AliasOwnedChildrenMigration)),
-    ServerSettings.layerTest({ crossProviderAgentOutputCapChars: cap }),
+    ServerSettings.layerTest({
+      enableCrossProviderAgentAccess,
+      crossProviderAgentOutputCapChars: cap,
+    }),
   ).pipe(Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 const wakeText = Effect.gen(function* () {
@@ -162,4 +165,21 @@ it.effect("keeps the native text when no grant store is available", () =>
       NATIVE_TEXT,
     );
   }).pipe(Effect.provide(ServerSettings.layerTest())),
+);
+
+it.effect("keeps the native text while cross-provider agent access is off", () =>
+  Effect.gen(function* () {
+    const grants = yield* DelegationGrants.DelegationGrants;
+    yield* grants.record({
+      childThreadId: aliasChild,
+      parentThreadId: parent,
+      depth: 1,
+      allowOrchestration: false,
+    });
+    yield* grants.markAliasOwned(aliasChild);
+    assert.strictEqual(
+      yield* (yield* wakeText)(NATIVE_TEXT, [task(aliasChild, "completed", "result")]),
+      NATIVE_TEXT,
+    );
+  }).pipe(Effect.provide(layerStored(5000, false))),
 );

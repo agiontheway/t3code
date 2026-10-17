@@ -452,7 +452,16 @@ const makeLayer = (input: {
       },
     },
     layerRegistry,
-    { runContinuationWorker: input.deliverWakes === true },
+    {
+      runContinuationWorker: input.deliverWakes === true,
+      // The orchestrator builds the parent wake from the same access toggle and output cap.
+      serverSettings: {
+        enableCrossProviderAgentAccess: input.settings?.enableCrossProviderAgentAccess ?? true,
+        ...(input.settings?.crossProviderAgentOutputCapChars === undefined
+          ? {}
+          : { crossProviderAgentOutputCapChars: input.settings.crossProviderAgentOutputCapChars }),
+      },
+    },
   ).pipe(Layer.provide(layerContinuations));
   const layerOrchestration = Layer.merge(
     layerOrchestrator,
@@ -1281,23 +1290,24 @@ describe("automatic result delivery in the parent wake", () => {
   );
 
   it.live("caps a long child result to head and tail inside the wake", () =>
-    // The replay harness runs the orchestrator on default settings: the 5000-character cap.
-    withEnvironment({ deliverWakes: true }, (script, cwd) =>
-      Effect.gen(function* () {
-        const root = yield* seedRoot(cwd);
-        const prompt = "Write the long report.";
-        script.responses.set(prompt, "A".repeat(4000) + "Z".repeat(4000));
-        const handle = yield* spawn(root, { ...SOL, prompt });
+    withEnvironment(
+      { deliverWakes: true, settings: { crossProviderAgentOutputCapChars: 500 } },
+      (script, cwd) =>
+        Effect.gen(function* () {
+          const root = yield* seedRoot(cwd);
+          const prompt = "Write the long report.";
+          script.responses.set(prompt, "A".repeat(400) + "Z".repeat(400));
+          const handle = yield* spawn(root, { ...SOL, prompt });
 
-        const [payload] = payloadsOf(yield* awaitWake(ROOT, handle.taskId));
-        assert.strictEqual(payload?.truncated, true);
-        assert.strictEqual(payload?.totalChars, 8000);
-        const output = payload?.output as string;
-        assert.isAtMost(output.length, 5000);
-        assert.match(output, /^A+\n\[…/u);
-        assert.match(output, /…\]\nZ+$/u);
-        assert.include(output, `call agent_result with childId "${handle.childId}"`);
-      }),
+          const [payload] = payloadsOf(yield* awaitWake(ROOT, handle.taskId));
+          assert.strictEqual(payload?.truncated, true);
+          assert.strictEqual(payload?.totalChars, 800);
+          const output = payload?.output as string;
+          assert.isAtMost(output.length, 500);
+          assert.match(output, /^A+\n\[…/u);
+          assert.match(output, /…\]\nZ+$/u);
+          assert.include(output, `call agent_result with childId "${handle.childId}"`);
+        }),
     ),
   );
 
