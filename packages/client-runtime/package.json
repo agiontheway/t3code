@@ -255,6 +255,10 @@
       "types": "./src/state/shell.ts",
       "default": "./src/state/shell.ts"
     },
+    "./state/signal": {
+      "types": "./src/state/signal.ts",
+      "default": "./src/state/signal.ts"
+    },
     "./state/source-control": {
       "types": "./src/state/sourceControl.ts",
       "default": "./src/state/sourceControl.ts"
