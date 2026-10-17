@@ -8,6 +8,7 @@ import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 
 import * as AttachmentClaims from "./AttachmentClaims.ts";
+import { isServerReservedMessageId } from "./fork/StartIfIdleAdmission.ts"; // fork
 import * as ThreadLaunch from "./ThreadLaunchService.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 
@@ -58,6 +59,18 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
   command: OrchestrationV2Command,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
+  // fork: clients pick their own creationSource, so server-only dispatch
+  // (start_if_idle, heartbeat/Signal message ids) is refused here.
+  if (
+    command.type === "message.dispatch" &&
+    (command.dispatchMode.type === "start_if_idle" || isServerReservedMessageId(command.messageId))
+  ) {
+    return yield* new Orchestrator.OrchestratorDispatchError({
+      commandId: command.commandId,
+      commandType: command.type,
+      cause: "start_if_idle and server-reserved message ids are server-only.",
+    });
+  }
   if (command.type === "runtime-request.respond" && command.attachmentsByQuestionId) {
     const config = yield* ServerConfig.ServerConfig;
     const incomingByQuestionId = command.attachmentsByQuestionId;

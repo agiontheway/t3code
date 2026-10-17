@@ -134,6 +134,12 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+// fork: start_if_idle admission helpers.
+import {
+  isServerReservedMessageId,
+  isThreadBusyForStartIfIdle,
+  startIfIdleFenceCommandTypes,
+} from "./fork/StartIfIdleAdmission.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -220,6 +226,17 @@ export class OrchestratorThreadAboveModeLimitError extends Schema.TaggedError<Or
   }
 }
 
+// fork: a start_if_idle dispatch found the thread busy. Nothing is recorded, so
+// the same command id can be retried once the thread is idle.
+export class OrchestratorThreadBusyError extends Schema.TaggedError<OrchestratorThreadBusyError>()(
+  "OrchestratorThreadBusyError",
+  { commandId: CommandId, threadId: ThreadId },
+) {
+  override get message(): string {
+    return `Thread ${this.threadId} is busy; command ${this.commandId} starts only on an idle thread.`;
+  }
+}
+
 export class OrchestratorCommandPreviouslyRejectedError extends Schema.TaggedError<OrchestratorCommandPreviouslyRejectedError>()(
   "OrchestratorCommandPreviouslyRejectedError",
   {
@@ -270,6 +287,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorCommandIdConflictError,
   OrchestratorSubagentThreadReadOnlyError,
   OrchestratorThreadAboveModeLimitError,
+  OrchestratorThreadBusyError, // fork: start_if_idle admission
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
@@ -4557,6 +4575,52 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);
+    });
+
+  // fork: start_if_idle and server-reserved message ids (heartbeat, Signal) are
+  // server-only. Busy is judged under the thread dispatch lock, so a concurrent
+  // dispatch cannot also start; an idle thread starts it like start_immediately.
+  const admitStartIfIdle = (
+    command: Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) =>
+    Effect.gen(function* () {
+      const mode = command.dispatchMode;
+      if (
+        command.creationSource !== "server" &&
+        (mode.type === "start_if_idle" || isServerReservedMessageId(command.messageId))
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "start_if_idle and server-reserved message ids are server-only.",
+        });
+      }
+      if (mode.type !== "start_if_idle") return { ...command, dispatchMode: mode };
+      const projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+      if (isThreadBusyForStartIfIdle(projection)) {
+        return yield* new OrchestratorThreadBusyError({
+          commandId: command.commandId,
+          threadId: command.threadId,
+        });
+      }
+      if (mode.fence !== undefined) {
+        const fencedAt = yield* commandReceipts
+          .latestAcceptedSequence({
+            commandId: command.commandId,
+            threadId: command.threadId,
+            commandTypes: startIfIdleFenceCommandTypes(mode.fence.kinds),
+          })
+          .pipe(mapDispatchError(command));
+        if (fencedAt !== null && fencedAt > mode.fence.afterSequence) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `start_if_idle fence: thread was stopped or interrupted at sequence ${fencedAt}, after ${mode.fence.afterSequence}.`,
+          });
+        }
+      }
+      return { ...command, dispatchMode: { type: "start_immediately" as const } };
     });
 
   const dispatchMessage = (
@@ -10922,7 +10986,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             threadId: command.threadId,
           });
         }
-        yield* dispatchMessage(command, events, effects);
+        // fork: start_if_idle admission and server-reserved message ids.
+        yield* dispatchMessage(yield* admitStartIfIdle(command, events), events, effects);
         yield* recordSubagentFollowup(command, events).pipe(mapDispatchError(command));
         break;
       }
@@ -11179,6 +11244,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           // Refused like the check above: nothing recorded, so the same command
           // can go through once the thread's user lowers it again.
           if (cause._tag === "OrchestratorThreadAboveModeLimitError") return yield* cause;
+          // fork: busy start_if_idle stays retryable under the same command id.
+          if (cause._tag === "OrchestratorThreadBusyError") return yield* cause;
           const rejectedAt = yield* DateTime.now;
           const receipt = yield* eventSink
             .commitRejectedCommand({

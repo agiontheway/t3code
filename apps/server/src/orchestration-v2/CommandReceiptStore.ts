@@ -86,6 +86,12 @@ export interface CommandReceiptStoreV2Shape {
   readonly getProjectByCommandId: (
     commandId: CommandId,
   ) => Effect.Effect<Option.Option<ProjectCommandReceiptV2>, CommandReceiptStoreV2Error>;
+  /** fork: highest accepted result sequence for these thread command types; fences start_if_idle. */
+  readonly latestAcceptedSequence: (input: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly commandTypes: ReadonlyArray<string>;
+  }) => Effect.Effect<number | null, CommandReceiptStoreV2Error>;
 }
 
 export class CommandReceiptStoreV2 extends Context.Service<
@@ -203,6 +209,11 @@ const layerBase: Layer.Layer<
           ),
           Effect.mapError((cause) => new CommandReceiptStoreReadError({ commandId, cause })),
         ),
+      // fork: start_if_idle fence read.
+      latestAcceptedSequence: ({ commandId, threadId, commandTypes }) =>
+        receipts
+          .latestAcceptedSequence({ threadId, commandTypes })
+          .pipe(Effect.mapError((cause) => new CommandReceiptStoreReadError({ commandId, cause }))),
     } satisfies CommandReceiptStoreV2Shape);
   }),
 );

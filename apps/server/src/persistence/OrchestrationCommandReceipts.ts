@@ -65,6 +65,15 @@ export class OrchestrationCommandReceiptRepository extends Context.Service<
       Option.Option<OrchestrationCommandReceipt>,
       OrchestrationCommandReceiptRepositoryError
     >;
+
+    /**
+     * fork: highest result sequence of an accepted thread command of these
+     * types, or null when none; fences `start_if_idle` admission.
+     */
+    readonly latestAcceptedSequence: (input: {
+      readonly threadId: ThreadId;
+      readonly commandTypes: ReadonlyArray<string>;
+    }) => Effect.Effect<number | null, OrchestrationCommandReceiptRepositoryError>;
   }
 >()("t3/persistence/OrchestrationCommandReceipts/OrchestrationCommandReceiptRepository") {}
 
@@ -173,10 +182,32 @@ const makeOrchestrationCommandReceiptRepository = Effect.gen(function* () {
       ),
     );
 
+  // fork: start_if_idle fence read.
+  const latestAcceptedSequence: OrchestrationCommandReceiptRepository["Service"]["latestAcceptedSequence"] =
+    ({ threadId, commandTypes }) =>
+      commandTypes.length === 0
+        ? Effect.succeed(null)
+        : sql<{ readonly sequence: number | null }>`
+            SELECT MAX(result_sequence) AS sequence
+            FROM orchestration_command_receipts
+            WHERE aggregate_kind = 'thread'
+              AND aggregate_id = ${threadId}
+              AND status = 'accepted'
+              AND command_type IN ${sql.in(commandTypes)}
+          `.pipe(
+            Effect.map((rows) => rows[0]?.sequence ?? null),
+            Effect.mapError(
+              toPersistenceSqlError(
+                "OrchestrationCommandReceiptRepository.latestAcceptedSequence:query",
+              ),
+            ),
+          );
+
   return {
     insertIfAbsent,
     upsert,
     getByCommandId,
+    latestAcceptedSequence,
   } satisfies OrchestrationCommandReceiptRepository["Service"];
 });
 
