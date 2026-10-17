@@ -321,6 +321,22 @@ describe("resolveNewThreadEnvMode", () => {
   });
 });
 
+// fork
+describe("enableHeartbeatAccess", () => {
+  it("defaults on and resolves a project override without touching other projects", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      projectSettingsOverrides: { [projectId]: { enableHeartbeatAccess: false } },
+    });
+    expect(resolveProjectSettings(settings, projectId).settings.enableHeartbeatAccess).toBe(false);
+    expect(resolveProjectSettings(settings, projectId).sources.enableHeartbeatAccess).toBe(
+      "project",
+    );
+    expect(resolveProjectSettings(settings, otherProjectId).settings.enableHeartbeatAccess).toBe(
+      true,
+    );
+  });
+});
+
 describe("projectSettingsOverrides patches", () => {
   it("replaces a project's entry, removes it with null, and drops empty entries", () => {
     const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {

@@ -103,6 +103,7 @@ import {
   WsRpcGroup,
 } from "@t3tools/contracts";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import { deriveDefaultCrossProviderAgentRoutes } from "@t3tools/shared/crossProviderAgentRoutes"; // fork
 import {
   HttpRouter,
   HttpServerRequest,
@@ -1721,6 +1722,7 @@ const layerWsRpc = (
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,
+            crossProviderAgentRouteDefaults: deriveDefaultCrossProviderAgentRoutes(providers), // fork
             ...editorConfig,
             // Same discovery-with-timeout treatment as editors: a slow probe
             // must not stall server.getConfig, so it degrades to no targets.
@@ -3027,7 +3029,12 @@ const layerWsRpc = (
                 Stream.map((providers) => ({
                   version: 1 as const,
                   type: "providerStatuses" as const,
-                  payload: { providers },
+                  payload: {
+                    providers,
+                    // fork
+                    crossProviderAgentRouteDefaults:
+                      deriveDefaultCrossProviderAgentRoutes(providers),
+                  },
                 })),
                 Stream.debounce(Duration.millis(PROVIDER_STATUS_DEBOUNCE_MS)),
               );

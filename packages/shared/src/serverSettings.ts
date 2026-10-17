@@ -418,6 +418,8 @@ export function applyServerSettingsPatch(
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
     usageModelAliases: usageModelAliasesPatch,
+    // fork: whole-map replacement; deepMerge would keep routes the client removed.
+    crossProviderAgentRoutes: crossProviderAgentRoutesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
     // Already translated into `projectSettingsOverrides` above; the legacy
@@ -550,6 +552,10 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
+      : {}),
+    // fork
+    ...(crossProviderAgentRoutesPatch !== undefined
+      ? { crossProviderAgentRoutes: crossProviderAgentRoutesPatch }
       : {}),
     ...(patch.worktreesDirectory !== undefined &&
     patch.worktreesDirectory !== current.worktreesDirectory
