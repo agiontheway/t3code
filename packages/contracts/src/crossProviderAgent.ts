@@ -68,7 +68,7 @@ export const CROSS_PROVIDER_AGENT_TOOL_DESCRIPTIONS: Record<CrossProviderAgentTo
   agent_result:
     "Read the stored final output of an owned settled child, optionally a character range (offset, limit). Use when an automatically delivered result or agent_wait reports truncated:true, or to recover stored output after a restart or missed delivery.",
   agent_follow_up:
-    "Start another turn on an owned settled child with a new prompt (same thread, same provider instance and model). Returns immediately; terminal status and final output are automatically delivered when this turn settles. Use agent_wait only when you intentionally need to block.",
+    "Start another turn on an owned settled child with a new prompt (same thread, same provider instance and model). Returns immediately; terminal status and final output are automatically delivered when this turn settles. To wait for a period of time, use the heartbeat tools (t3_heartbeat_create / t3_heartbeat_wakeup).",
   agent_interrupt:
     "Interrupt an owned child that is currently running. The child settles as interrupted; you may follow it up later.",
 };

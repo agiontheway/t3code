@@ -9,6 +9,9 @@
 - [Terminal history](./user/terminal.md)
 - [Source control](./user/source-control.md)
 - [Project settings](./user/project-settings.md)
+- [Cross-provider agents](./user/cross-provider-agents.md)
+- [Scheduled wake-ups](./user/heartbeat.md)
+- [Signal commands](./user/signal.md)
 - [Appearance and themes](./user/appearance.md)
 - [Keyboard shortcuts](./user/keybindings.md)
 - [SnapShots](./user/snap-shot.md)
@@ -59,6 +62,7 @@ source alone does not explain. Most code changes do not need an internal documen
 
 - [Development and local builds](./operations/development.md)
 - [T3 Connect setup](./operations/connect-setup.md)
+- [Fork upgrade 0.0.45 → 0.1.0](./operations/fork-upgrade-runbook.md)
 - [Release](./operations/release.md)
 - [Observability](./operations/observability.md)
 - [Relay observability](./operations/relay-observability.md)
