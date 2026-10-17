@@ -98,23 +98,43 @@ it.effect("takes the thread head from its own v2 events only", () =>
   ),
 );
 
+/** An accepted command that wrote one event; its receipt records that event. */
+const acceptWithEvent = (threadId: ThreadId, eventId: string, commandType: string) =>
+  Effect.gen(function* () {
+    const sequence = yield* appendEvent(threadId, eventId);
+    yield* recordReceipt(threadId, `cmd-${eventId}`, commandType, sequence);
+    return sequence;
+  });
+
 it.effect("cancels on accepted stop, archive and delete receipts only", () =>
   withRepository((repository) =>
     Effect.gen(function* () {
       assert.isUndefined(yield* repository.latestCancellationSequence(THREAD_ID));
-      yield* recordReceipt(THREAD_ID, "cmd-interrupt", "run.interrupt", 3);
-      yield* recordReceipt(THREAD_ID, "cmd-detach", "provider-session.detach", 4);
-      yield* recordReceipt(THREAD_ID, "cmd-unarchive", "thread.unarchive", 5);
-      yield* recordReceipt(THREAD_ID, "cmd-rejected-stop", "thread.stop", 6, "rejected");
-      yield* recordReceipt(OTHER_THREAD_ID, "cmd-other-stop", "thread.stop", 7);
+      yield* acceptWithEvent(THREAD_ID, "interrupt", "run.interrupt");
+      yield* acceptWithEvent(THREAD_ID, "detach", "provider-session.detach");
+      yield* acceptWithEvent(THREAD_ID, "unarchive", "thread.unarchive");
+      const rejectedAt = yield* appendEvent(THREAD_ID, "before-rejected-stop");
+      yield* recordReceipt(THREAD_ID, "cmd-rejected-stop", "thread.stop", rejectedAt, "rejected");
+      yield* acceptWithEvent(OTHER_THREAD_ID, "other-stop", "thread.stop");
       assert.isUndefined(yield* repository.latestCancellationSequence(THREAD_ID));
 
-      yield* recordReceipt(THREAD_ID, "cmd-stop", "thread.stop", 8);
-      assert.strictEqual(yield* repository.latestCancellationSequence(THREAD_ID), 8);
-      yield* recordReceipt(THREAD_ID, "cmd-archive", "thread.archive", 9);
-      assert.strictEqual(yield* repository.latestCancellationSequence(THREAD_ID), 9);
-      yield* recordReceipt(THREAD_ID, "cmd-delete", "thread.delete", 10);
-      assert.strictEqual(yield* repository.latestCancellationSequence(THREAD_ID), 10);
+      const stop = yield* acceptWithEvent(THREAD_ID, "stop", "thread.stop");
+      assert.strictEqual(yield* repository.latestCancellationSequence(THREAD_ID), stop);
+      const archive = yield* acceptWithEvent(THREAD_ID, "archive", "thread.archive");
+      assert.strictEqual(yield* repository.latestCancellationSequence(THREAD_ID), archive);
+      const deleted = yield* acceptWithEvent(THREAD_ID, "delete", "thread.delete");
+      assert.strictEqual(yield* repository.latestCancellationSequence(THREAD_ID), deleted);
+    }),
+  ),
+);
+
+it.effect("places an event-less stop one past the head it recorded", () =>
+  withRepository((repository) =>
+    Effect.gen(function* () {
+      const head = yield* appendEvent(THREAD_ID, "turn-completed");
+      // A Stop that ended nothing records the thread head and writes no event.
+      yield* recordReceipt(THREAD_ID, "cmd-idle-stop", "thread.stop", head);
+      assert.strictEqual(yield* repository.latestCancellationSequence(THREAD_ID), head + 1);
     }),
   ),
 );

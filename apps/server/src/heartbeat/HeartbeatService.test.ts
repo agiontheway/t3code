@@ -562,6 +562,42 @@ it.effect("prunes a pre-stop cron on restart while retaining and running a post-
   ),
 );
 
+it.effect("prunes a cron armed at the head an event-less stop recorded on restart", () =>
+  withService((service, repository) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const head = yield* appendThreadEvent("evt-turn-completed", "run.updated");
+      const job = yield* service.create(THREAD_ID, {
+        ...recurringInput,
+        recurring: false,
+        cron: HeartbeatCronExpression.make("1 11 * * *"),
+      });
+      assert.deepStrictEqual(
+        (yield* repository.listByThread(THREAD_ID)).map((stored) => stored.originSequence),
+        [head],
+      );
+      // A Stop on an idle thread writes no event; its receipt records the head.
+      yield* sql`
+        INSERT INTO orchestration_command_receipts (
+          command_id, aggregate_kind, aggregate_id, command_type, accepted_at,
+          result_sequence, status, error
+        ) VALUES (
+          'cmd-idle-stop', 'thread', ${THREAD_ID}, 'thread.stop',
+          '2026-09-17T10:00:00.000Z', ${head}, 'accepted', NULL
+        )
+      `;
+
+      const restored = yield* HeartbeatService.make.pipe(
+        Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
+        Effect.provideService(Crypto.Crypto, makeCrypto()),
+      );
+      assert.deepStrictEqual((yield* restored.list(THREAD_ID)).jobs, []);
+      yield* restored.activateOnAcceptedTurn(THREAD_ID);
+      assert.deepStrictEqual(yield* restored.reserveDue(Date.parse(job.nextFireAt)), []);
+    }),
+  ),
+);
+
 it.effect("does not revive an archived cron after restore and later unarchive", () =>
   withService((service, repository) =>
     Effect.gen(function* () {

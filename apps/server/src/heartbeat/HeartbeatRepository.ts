@@ -153,18 +153,31 @@ export const make = Effect.gen(function* () {
       Effect.mapError(mapError("latestThreadSequence")),
     );
 
-  // Explicit stop, archive and delete remove every job created before them.
-  // Settle-driven session detach is a different command and never cancels.
+  // Explicit stop, archive and delete remove every job whose origin is below
+  // the returned sequence. Settle-driven session detach is a different command
+  // and never cancels. A command that wrote events records its last event, so
+  // a job armed at that sequence came after it. A Stop that ended nothing
+  // writes no event and records the thread head it saw, so a job armed at that
+  // head cannot be proven later and is cancelled too (one past the head).
   const latestCancellationSequence: HeartbeatRepository["Service"]["latestCancellationSequence"] = (
     threadId,
   ) =>
     sql<{ readonly sequence: number | null }>`
-      SELECT MAX(result_sequence) AS sequence
-      FROM orchestration_command_receipts
-      WHERE aggregate_kind = 'thread'
-        AND aggregate_id = ${threadId}
-        AND status = 'accepted'
-        AND command_type IN ('thread.stop', 'thread.archive', 'thread.delete')
+      SELECT MAX(
+        receipts.result_sequence + CASE
+          WHEN EXISTS (
+            SELECT 1 FROM orchestration_events events
+            WHERE events.command_id = receipts.command_id
+              AND events.application_event_version = 2
+          ) THEN 0
+          ELSE 1
+        END
+      ) AS sequence
+      FROM orchestration_command_receipts receipts
+      WHERE receipts.aggregate_kind = 'thread'
+        AND receipts.aggregate_id = ${threadId}
+        AND receipts.status = 'accepted'
+        AND receipts.command_type IN ('thread.stop', 'thread.archive', 'thread.delete')
     `.pipe(
       Effect.map((rows) => rows[0]?.sequence ?? undefined),
       Effect.mapError(mapError("latestCancellationSequence")),
