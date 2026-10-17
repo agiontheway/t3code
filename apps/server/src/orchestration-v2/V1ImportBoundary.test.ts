@@ -19,6 +19,13 @@ const legacyReaders = ["orchestration-v2/legacy/", "persistence/Migrations/"] as
 const legacyReaderFiles: Record<string, string> = {
   // Provider history for settings migration reads V1 thread sessions once at load.
   "serverSettings.ts": "one-time provider history for settings migration",
+  // fork: the 0.0.45 fork stored child lineage in `projection_threads.spawn_json`.
+  "orchestration-v2/fork/LegacySpawnLineage.ts":
+    "maps v1 spawn_json into v2 lineage during the legacy import",
+  "persistence/ForkMigrationLedger.ts":
+    "detects the pre-ledger fork migration by inspecting v1 columns once at startup",
+  "persistence/ForkMigrations/001_ProjectionThreadsSpawn.ts":
+    "fork schema history: the v1 spawn_json column migration",
 };
 const retiredPaths = [
   "orchestration",
