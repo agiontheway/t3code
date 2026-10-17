@@ -730,8 +730,9 @@ const layerMakeRoutes = Layer.mergeAll(
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
-    // fork: delegate_task admission (delegation capability, depth cap, child grant rows).
-    Layer.provide(DelegationPolicy.layer.pipe(Layer.provide(DelegationGrants.layer))),
+    // fork: delegate_task admission (delegation capability, depth cap, child grant rows); the
+    // agent_* aliases also read the caller's depth from the grants.
+    Layer.provide(DelegationPolicy.layer.pipe(Layer.provideMerge(DelegationGrants.layer))),
   ),
 ).pipe(
   // Guides read through the same pull request service as every other surface.

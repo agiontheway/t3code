@@ -64,7 +64,7 @@ export const CROSS_PROVIDER_AGENT_TOOL_DESCRIPTIONS: Record<CrossProviderAgentTo
     "Create and start ONE child thread on an exact different provider instance with the given prompt. The child inherits your project, worktree, branch, and permission mode. Returns a durable childId; terminal status and final output are automatically delivered to your conversation when the child settles. Set allowOrchestration only when the child must itself delegate further (costs one depth level). Omit effort to inherit your own reasoning effort when the target model offers it (otherwise the target's default); an effort the target model does not offer is rejected. " +
     SAME_INSTANCE_NOTE,
   agent_wait:
-    "Intentionally block until the given owned children settle (completed, error, or interrupted) or timeoutSeconds elapses, then return each child's state and final output. Automatic completion delivery does not require this tool and does not cancel an intentional wait. Waits on T3 events; call again with the unsettled ids to keep waiting. Long outputs are returned as head + tail with truncated:true; fetch the rest with agent_result.",
+    "Intentionally block until the given owned children settle (completed, error, or interrupted) or timeoutSeconds elapses, then return each child's state and final output. One call waits at most 60 minutes; without timeoutSeconds it waits the full 60 minutes. Automatic completion delivery does not require this tool and does not cancel an intentional wait. Waits on T3 events; call again with the unsettled ids to keep waiting. Long outputs are returned as head + tail with truncated:true; fetch the rest with agent_result.",
   agent_result:
     "Read the stored final output of an owned settled child, optionally a character range (offset, limit). Use when an automatically delivered result or agent_wait reports truncated:true, or to recover stored output after a restart or missed delivery.",
   agent_follow_up:
@@ -106,9 +106,10 @@ export const CrossProviderAgentSpawnInput = Schema.Struct({
 });
 export type CrossProviderAgentSpawnInput = typeof CrossProviderAgentSpawnInput.Type;
 
-/** Bounds on one wait call; larger inputs fail with `invalid_input`. */
+/** Bounds on one wait call; larger inputs are rejected. */
 const CROSS_PROVIDER_AGENT_WAIT_MAX_CHILDREN = 32;
-const CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS = 600;
+// fork: 60 minutes, the longest an MCP tool call can block (provider clients time out at 65).
+export const CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS = 3600;
 
 export const CrossProviderAgentWaitInput = Schema.Struct({
   childIds: Schema.Array(ChildIdInput)
@@ -121,7 +122,7 @@ export const CrossProviderAgentWaitInput = Schema.Struct({
       Schema.isGreaterThan(0),
       Schema.isLessThanOrEqualTo(CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS),
     ).annotate({
-      description: `Return unsettled entries after this many seconds (max ${CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS}) instead of blocking.`,
+      description: `Return unsettled entries after this many seconds (max ${CROSS_PROVIDER_AGENT_WAIT_MAX_TIMEOUT_SECONDS}, 60 minutes; omitted waits the full 60 minutes).`,
     }),
   ),
 });

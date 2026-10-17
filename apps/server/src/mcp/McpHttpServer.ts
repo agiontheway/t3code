@@ -39,6 +39,9 @@ import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
+import * as CrossProviderAgentHandlers from "./toolkits/crossProviderAgent/handlers.ts"; // fork
+import * as CrossProviderAgentMcpService from "./toolkits/crossProviderAgent/service.ts"; // fork
+import { CrossProviderAgentToolkit } from "./toolkits/crossProviderAgent/tools.ts"; // fork
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
 import {
   PreviewSnapshotTool,
@@ -814,6 +817,15 @@ export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorHandlers.layer,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
+// fork: agent_* cross-provider agent aliases over the delegated-task substrate.
+export const layerCrossProviderAgentToolkit = toolkitRegistration(
+  CrossProviderAgentToolkit,
+  CrossProviderAgentHandlers.layer,
+).pipe(
+  Layer.provide(CrossProviderAgentMcpService.layer),
+  Layer.provide(OrchestratorMcpService.layer),
+);
+
 export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
@@ -869,6 +881,7 @@ export const layerMcpTransport = McpServer.layerHttp({
 export const layer = Layer.mergeAll(
   layerPreviewToolkit,
   layerOrchestratorToolkit,
+  layerCrossProviderAgentToolkit, // fork
   layerThreadToolkit,
   layerAttachmentToolkit,
   layerProjectRegistration,

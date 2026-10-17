@@ -195,6 +195,20 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadInterruptInput,
   ) => Effect.Effect<OrchestratorMcpThreadInterruptResult, OrchestratorMcpFailure>;
+  // fork: internal (non-MCP) reads for the agent_* aliases. An ancestor may own a task, so it is
+  // read as its direct parent, and reading never acknowledges the task's automatic delivery.
+  readonly readTaskAsParent: (
+    scope: McpThreadInvocationScope,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+  ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
+  /** Ends when the task is terminal or has a blocking question; none on timeout. */
+  readonly waitForTaskAsParent: (
+    scope: McpThreadInvocationScope,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    timeoutMs: number,
+  ) => Effect.Effect<Option.Option<OrchestratorMcpDelegateTaskResult>, OrchestratorMcpFailure>;
 }
 
 export class OrchestratorMcpService extends Context.Service<
@@ -1519,7 +1533,12 @@ const make = Effect.gen(function* () {
 
   // Re-read the task only when an event on the parent or child thread can
   // change its status, instead of polling the projections every 50 ms.
-  const waitForTask = (scope: McpThreadInvocationScope, taskId: NodeId, timeoutMs: number) =>
+  const waitForTask = (
+    scope: McpThreadInvocationScope,
+    taskId: NodeId,
+    timeoutMs: number,
+    acknowledgeTerminal = true, // fork: the agent_* aliases never acknowledge
+  ) =>
     Effect.gen(function* () {
       const streamError = (error: unknown) =>
         failure(
@@ -1531,7 +1550,7 @@ const make = Effect.gen(function* () {
       const afterSequence = yield* threadManagement
         .getThreadEventSequence(scope.thread.threadId)
         .pipe(Effect.mapError(streamError));
-      const initial = yield* readTask(scope, taskId, false, true);
+      const initial = yield* readTask(scope, taskId, false, acknowledgeTerminal);
       if (initial.hasPendingQuestion || isTerminalTaskStatus(initial.status)) {
         return Option.some(initial);
       }
@@ -1547,7 +1566,7 @@ const make = Effect.gen(function* () {
         { concurrency: "unbounded" },
       ).pipe(
         Stream.mapError(streamError),
-        Stream.mapEffect(() => readTask(scope, taskId, false, true)),
+        Stream.mapEffect(() => readTask(scope, taskId, false, acknowledgeTerminal)),
         Stream.filter((result) => result.hasPendingQuestion || isTerminalTaskStatus(result.status)),
         Stream.runHead,
       );
@@ -2725,7 +2744,21 @@ const make = Effect.gen(function* () {
           status: result.type === "already_terminal" ? result.run.status : "interrupt_requested",
         } satisfies OrchestratorMcpThreadInterruptResult;
       }),
+    // fork: the agent_* aliases read and wait on a task as its direct parent.
+    readTaskAsParent: (scope, parentThreadId, taskId) =>
+      readTask(asParent(scope, parentThreadId), taskId),
+    waitForTaskAsParent: (scope, parentThreadId, taskId, timeoutMs) =>
+      waitForTask(asParent(scope, parentThreadId), taskId, timeoutMs, false),
   });
+});
+
+// fork: the caller's scope with its thread replaced by the task's direct parent.
+const asParent = (
+  scope: McpThreadInvocationScope,
+  parentThreadId: ThreadId,
+): McpThreadInvocationScope => ({
+  ...scope,
+  thread: { ...scope.thread, threadId: parentThreadId },
 });
 
 export const layer: Layer.Layer<
