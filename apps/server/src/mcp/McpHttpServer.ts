@@ -61,6 +61,8 @@ import {
 } from "./toolkits/device/tools.ts";
 import * as HtmlHandlers from "./toolkits/html/handlers.ts";
 import { HtmlPreviewTool, HtmlPreviewToolkit, HtmlRenderToolkit } from "./toolkits/html/tools.ts";
+import * as HeartbeatHandlers from "./toolkits/heartbeat/handlers.ts"; // fork
+import { HeartbeatToolkit } from "./toolkits/heartbeat/tools.ts"; // fork
 
 /** Where an MCP client discovers how to sign in (RFC 9728), at this request's own origin. */
 const mcpResourceMetadataUrl = (request: HttpServerRequest.HttpServerRequest) =>
@@ -870,6 +872,9 @@ export const layerDeviceToolkit = Layer.mergeAll(
   layerDeviceScreenshotRegistration,
 );
 
+// fork: thread heartbeat tools (t3_heartbeat_create/list/delete/wakeup).
+const layerHeartbeatToolkit = toolkitRegistration(HeartbeatToolkit, HeartbeatHandlers.layer);
+
 export const layerMcpTransport = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -891,4 +896,5 @@ export const layer = Layer.mergeAll(
   layerPullRequestsToolkit,
   layerDeviceToolkit,
   layerHtmlToolkit,
+  layerHeartbeatToolkit, // fork
 ).pipe(Layer.provideMerge(layerMcpTransport));

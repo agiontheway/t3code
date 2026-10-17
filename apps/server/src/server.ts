@@ -178,6 +178,10 @@ import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as SignalHttp from "./signal/http.ts"; // fork
+import * as HeartbeatAdmissionReactor from "./heartbeat/HeartbeatAdmissionReactor.ts"; // fork
+import * as HeartbeatReactor from "./heartbeat/HeartbeatReactor.ts"; // fork
+import * as HeartbeatRepository from "./heartbeat/HeartbeatRepository.ts"; // fork
+import * as HeartbeatService from "./heartbeat/HeartbeatService.ts"; // fork
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
@@ -548,6 +552,10 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
   }),
 );
 
+// fork: one HeartbeatService instance for the scheduler loop, the admission
+// reactor and the MCP heartbeat toolkit.
+const layerHeartbeat = HeartbeatService.layer.pipe(Layer.provideMerge(HeartbeatRepository.layer));
+
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
@@ -581,6 +589,19 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
       yield* service.start();
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
+  // fork: delivers due heartbeats and applies thread lifecycle to their schedules. The
+  // lifecycle stream needs the same event sink instance the orchestrator writes through.
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const service = yield* HeartbeatAdmissionReactor.HeartbeatAdmissionReactor;
+      yield* service.start();
+    }),
+  ).pipe(
+    Layer.provide(HeartbeatAdmissionReactor.layer),
+    Layer.provide(HeartbeatReactor.layer),
+    Layer.provide(RuntimeLayer.layerEventSink),
+    Layer.provide(DelegationGrants.layer),
+  ),
   // Subscribes to `account.rate-limits.updated` so usage bars track live
   // telemetry instead of waiting for the next status probe.
   ProviderUsageLimitsIngestion.layer,
@@ -593,6 +614,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
 ).pipe(
   // Core Services
   Layer.provideMerge(layerOrchestrationApplication),
+  Layer.provideMerge(layerHeartbeat), // fork
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),
   Layer.provideMerge(Layer.merge(ProjectStore.layer, ThreadSearch.layer)),
   Layer.provideMerge(layerServerSettings),
@@ -732,6 +754,7 @@ const layerMakeRoutes = Layer.mergeAll(
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
     // fork: delegate_task admission (delegation capability, depth cap, child grant rows); the
     // agent_* aliases also read the caller's depth from the grants.
+    // fork: the heartbeat toolkit reads child grants too.
     Layer.provide(DelegationPolicy.layer.pipe(Layer.provideMerge(DelegationGrants.layer))),
   ),
 ).pipe(
