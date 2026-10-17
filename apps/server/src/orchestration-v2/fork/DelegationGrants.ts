@@ -51,6 +51,14 @@ export class DelegationGrants extends Context.Service<
     ) => Effect.Effect<Option.Option<DelegationGrant>, ProjectionRepositoryError>;
     /** The thread's recorded depth, or 0 when it has no grant. */
     readonly depthOf: (threadId: ThreadId) => Effect.Effect<number, ProjectionRepositoryError>;
+    /** Mark a child as spawned or followed up through the `agent_*` aliases. Idempotent. */
+    readonly markAliasOwned: (
+      childThreadId: ThreadId,
+    ) => Effect.Effect<void, ProjectionRepositoryError>;
+    /** True when the child has a grant and was marked by the aliases. */
+    readonly isAliasOwned: (
+      childThreadId: ThreadId,
+    ) => Effect.Effect<boolean, ProjectionRepositoryError>;
   }
 >()("t3/orchestration-v2/fork/DelegationGrants") {}
 
@@ -93,6 +101,27 @@ const make = Effect.gen(function* () {
     `,
   });
 
+  const insertAliasOwned = SqlSchema.void({
+    Request: Schema.Struct({ childThreadId: ThreadId, createdAt: IsoDateTime }),
+    execute: (row) => sql`
+      INSERT INTO fork_alias_owned_children (child_thread_id, created_at)
+      VALUES (${row.childThreadId}, ${row.createdAt})
+      ON CONFLICT (child_thread_id) DO NOTHING
+    `,
+  });
+
+  const selectAliasOwned = SqlSchema.findOneOption({
+    Request: ThreadId,
+    Result: Schema.Struct({ childThreadId: ThreadId }),
+    execute: (threadId) => sql`
+      SELECT alias.child_thread_id AS "childThreadId"
+      FROM fork_alias_owned_children AS alias
+      JOIN fork_delegation_grants AS grants
+        ON grants.child_thread_id = alias.child_thread_id
+      WHERE alias.child_thread_id = ${threadId}
+    `,
+  });
+
   const toRepositoryError =
     (operation: string) =>
     (cause: unknown): ProjectionRepositoryError =>
@@ -118,6 +147,16 @@ const make = Effect.gen(function* () {
             onSome: (grant) => grant.depth,
           }),
         ),
+      ),
+    markAliasOwned: (childThreadId) =>
+      Effect.gen(function* () {
+        const createdAt = DateTime.formatIso(yield* DateTime.now);
+        yield* insertAliasOwned({ childThreadId, createdAt });
+      }).pipe(Effect.mapError(toRepositoryError("DelegationGrants.markAliasOwned"))),
+    isAliasOwned: (childThreadId) =>
+      selectAliasOwned(childThreadId).pipe(
+        Effect.map(Option.isSome),
+        Effect.mapError(toRepositoryError("DelegationGrants.isAliasOwned")),
       ),
   });
 });

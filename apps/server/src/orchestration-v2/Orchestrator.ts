@@ -142,6 +142,8 @@ import {
 } from "./fork/StartIfIdleAdmission.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+import * as AliasCompletionPayload from "./fork/AliasCompletionPayload.ts"; // fork
+import { DelegationGrants } from "./fork/DelegationGrants.ts"; // fork
 
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
@@ -869,6 +871,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const runtimePolicy = yield* RuntimePolicyV2;
   const threadForkService = yield* ThreadForkServiceV2;
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+  // fork: wakes for agent_* children carry the capped child result inline (0.0.45 parity).
+  const forkCompletionWakeText = AliasCompletionPayload.makeCompletionWakeText({
+    grants: yield* Effect.serviceOption(DelegationGrants),
+    serverSettings,
+  });
+  const delegatedCompletionWakeText = (
+    taskIds: ReadonlyArray<string>,
+    subagents: ReadonlyArray<OrchestrationV2Subagent>,
+  ) =>
+    forkCompletionWakeText(
+      delegatedCompletionWakeDetail(taskIds),
+      taskIds.map((taskId) => subagents.find((task) => task.id === taskId)),
+    );
 
   const mapDispatchError =
     (command: OrchestrationV2ServerCommand) =>
@@ -2131,7 +2146,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             occurredAt: now,
             payload: {
               ...message,
-              text: delegatedCompletionWakeDetail(remainingTaskIds),
+              text: yield* delegatedCompletionWakeText(remainingTaskIds, projection.subagents), // fork
               delegatedCompletion: {
                 parentRunId: parentRun.id,
                 generation: delivery.generation,
@@ -4934,7 +4949,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const dispatchText =
         delegatedCompletion === undefined
           ? command.text
-          : delegatedCompletionWakeDetail(delegatedCompletion.taskIds);
+          : yield* delegatedCompletionWakeText(delegatedCompletion.taskIds, projection.subagents); // fork
       const sourcePlanProjection =
         command.sourcePlanRef === undefined
           ? null
@@ -10057,6 +10072,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (deliveryRun?.status === "queued" && deliveryRun.userMessageId === delivery?.messageId) {
         const taskIds = Array.from(new Set([...delivery.taskIds, input.task.id]));
         const message = completionDeliveryMessage(input.parentProjection, delivery);
+        // fork: this task's result is in updatedTask, not yet in the projection.
+        const wakeText = yield* delegatedCompletionWakeText(taskIds, [
+          input.updatedTask,
+          ...input.parentProjection.subagents,
+        ]);
         const nextCohort = {
           ...cohort!,
           delivery: {
@@ -10081,7 +10101,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               ? undefined
               : {
                   ...message,
-                  text: delegatedCompletionWakeDetail(taskIds),
+                  text: wakeText, // fork
                   delegatedCompletion: {
                     parentRunId: input.parentRun.id,
                     generation: delivery.generation,

@@ -13,6 +13,7 @@ import ProjectionThreadsSpawn from "./ForkMigrations/001_ProjectionThreadsSpawn.
 import HeartbeatJobs from "./ForkMigrations/002_HeartbeatJobs.ts";
 import HeartbeatV2SequenceSpace from "./ForkMigrations/003_HeartbeatV2SequenceSpace.ts";
 import DelegationGrants from "./ForkMigrations/004_DelegationGrants.ts";
+import AliasOwnedChildren from "./ForkMigrations/005_AliasOwnedChildren.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 
 const PULL_REQUEST_COLUMNS = [
@@ -103,6 +104,7 @@ export const runForkMigrations = Effect.fn("runForkMigrations")(function* () {
       "2_HeartbeatJobs": HeartbeatJobs,
       "3_HeartbeatV2SequenceSpace": HeartbeatV2SequenceSpace,
       "4_DelegationGrants": DelegationGrants,
+      "5_AliasOwnedChildren": AliasOwnedChildren,
     }),
   });
 });

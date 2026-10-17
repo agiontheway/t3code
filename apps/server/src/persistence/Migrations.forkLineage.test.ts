@@ -55,11 +55,13 @@ const assertCurrentSchema = Effect.gen(function* () {
       { migration_id: 2, name: "HeartbeatJobs" },
       { migration_id: 3, name: "HeartbeatV2SequenceSpace" },
       { migration_id: 4, name: "DelegationGrants" },
+      { migration_id: 5, name: "AliasOwnedChildren" },
     ],
   );
   assert.deepStrictEqual(
-    yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('heartbeat_jobs', 'heartbeat_occurrences', 'fork_delegation_grants') ORDER BY name`,
+    yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('heartbeat_jobs', 'heartbeat_occurrences', 'fork_delegation_grants', 'fork_alias_owned_children') ORDER BY name`,
     [
+      { name: "fork_alias_owned_children" },
       { name: "fork_delegation_grants" },
       { name: "heartbeat_jobs" },
       { name: "heartbeat_occurrences" },

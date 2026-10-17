@@ -421,7 +421,7 @@ const make = Effect.gen(function* () {
               title: threadTitle(input.title, input.prompt),
               mode: "async",
             },
-            { allowOrchestration: input.allowOrchestration === true },
+            { allowOrchestration: input.allowOrchestration === true, aliasOwned: true },
           )
           .pipe(
             Effect.catch(fromNative({ providerInstanceId: targetInstanceId, model: input.model })),
@@ -537,6 +537,12 @@ const make = Effect.gen(function* () {
             message: "The child is still running; wait for it before following up.",
             childId: child.childThreadId,
           });
+        }
+        // The follow-up's completion wake carries its result inline, like a spawned child's.
+        if (Option.isSome(grants)) {
+          yield* grants.value
+            .markAliasOwned(child.childThreadId)
+            .pipe(orInternal("markAliasOwned"));
         }
         // A send to a settled app-owned child from its direct parent starts a fresh task whose
         // completion wakes that parent, so an ancestor sends on the parent's behalf. The key

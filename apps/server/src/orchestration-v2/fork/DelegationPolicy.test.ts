@@ -7,6 +7,7 @@ import * as Option from "effect/Option";
 
 import type { McpCapability, McpInvocationScope } from "../../mcp/McpInvocationContext.ts";
 import DelegationGrantsMigration from "../../persistence/ForkMigrations/004_DelegationGrants.ts";
+import AliasOwnedChildrenMigration from "../../persistence/ForkMigrations/005_AliasOwnedChildren.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as DelegationGrants from "./DelegationGrants.ts";
 import * as DelegationPolicy from "./DelegationPolicy.ts";
@@ -154,4 +155,27 @@ it.effect("lets a replay of an accepted delegation through after the cap was low
     assert.ok(Option.isSome(deniedReplay));
     assert.strictEqual(deniedReplay.value.code, "capability_denied");
   }).pipe(Effect.provide(layerPolicy(1))),
+);
+
+it.effect("marks only children spawned through the aliases as alias-owned", () =>
+  Effect.gen(function* () {
+    yield* DelegationGrantsMigration;
+    yield* AliasOwnedChildrenMigration;
+    const grants = yield* DelegationGrants.DelegationGrants;
+    const policy = yield* DelegationPolicy.DelegationPolicy;
+    const aliasChild = ThreadId.make("alias-child");
+
+    assert.ok(Option.isNone(yield* admit({ parent: root, child, allowOrchestration: false })));
+    yield* policy.admit({
+      scope: scopeFor(root),
+      parentThreadId: root,
+      childThreadId: aliasChild,
+      allowOrchestration: false,
+      aliasOwned: true,
+      replay: false,
+    });
+
+    assert.isFalse(yield* grants.isAliasOwned(child));
+    assert.isTrue(yield* grants.isAliasOwned(aliasChild));
+  }).pipe(Effect.provide(layerPolicy(2))),
 );

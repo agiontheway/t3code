@@ -137,7 +137,7 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTaskInput,
     // fork: set by agent_spawn; native delegate_task children never get orchestration.
-    fork?: { readonly allowOrchestration: boolean },
+    fork?: { readonly allowOrchestration: boolean; readonly aliasOwned?: boolean },
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
   readonly taskStatus: (
     scope: McpInvocationScope,
@@ -2039,6 +2039,7 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.thread.threadId,
             childThreadId: IdAllocator.derive.delegatedTaskThread({ commandId }),
             allowOrchestration: fork?.allowOrchestration === true,
+            aliasOwned: fork?.aliasOwned === true,
             replay: isRetryOfAcceptedDelegation,
           });
         }

@@ -11,6 +11,8 @@ import {
   MessageId,
   type ModelCapabilities,
   type ModelSelection,
+  type NodeId,
+  type OrchestrationV2ConversationMessage,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
@@ -25,6 +27,7 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
@@ -51,6 +54,7 @@ import * as ProviderReplayHarness from "../../../orchestration-v2/testkit/Provid
 import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import DelegationGrantsMigration from "../../../persistence/ForkMigrations/004_DelegationGrants.ts";
+import AliasOwnedChildrenMigration from "../../../persistence/ForkMigrations/005_AliasOwnedChildren.ts";
 import * as SqlitePersistence from "../../../persistence/Sqlite.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ProviderRegistryMock from "../../../provider/testUtils/providerRegistryMock.ts";
@@ -60,6 +64,7 @@ import * as ServerSettingsService from "../../../serverSettings.ts";
 import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 
 const CLAUDE = ProviderInstanceId.make("claudeAgent");
 const CODEX = ProviderInstanceId.make("codex");
@@ -71,6 +76,8 @@ const ROOT = ThreadId.make("thread:xp-root");
 
 /** Turns whose prompt starts with this stay running until interrupted. */
 const KEEP_RUNNING = "Keep running:";
+/** Turns whose prompt starts with this answer, then fail. */
+const FAIL = "Fail:";
 
 /** Effort choices the way each driver's catalog describes them. */
 const EFFORT_CAPABILITIES: Record<string, ModelCapabilities> = {
@@ -194,7 +201,7 @@ function scriptedAdapter(input: {
         const providerTurn = (
           turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
           providerTurnId: ProviderTurnId,
-          status: "running" | "completed" | "interrupted",
+          status: "running" | "completed" | "failed" | "interrupted",
           at: DateTime.Utc,
         ): ProviderAdapter.ProviderAdapterV2Event => ({
           type: "provider_turn.updated",
@@ -222,8 +229,9 @@ function scriptedAdapter(input: {
           Effect.gen(function* () {
             const at = yield* DateTime.now;
             const text = turnInput.message.text;
+            const failed = text.startsWith(FAIL);
             yield* publish([
-              providerTurn(turnInput, providerTurnId, "completed", at),
+              providerTurn(turnInput, providerTurnId, failed ? "failed" : "completed", at),
               {
                 type: "turn_item.updated",
                 driver: input.driver,
@@ -252,16 +260,32 @@ function scriptedAdapter(input: {
                   streaming: false,
                 },
               },
-              {
-                type: "turn.terminal",
-                driver: input.driver,
-                providerThreadId: turnInput.providerThread.id,
-                providerTurnId,
-                runOrdinal: turnInput.runOrdinal,
-                status: "completed",
-                failure: null,
-                threadDisposition: "reusable",
-              },
+              failed
+                ? {
+                    type: "turn.terminal",
+                    driver: input.driver,
+                    providerThreadId: turnInput.providerThread.id,
+                    providerTurnId,
+                    runOrdinal: turnInput.runOrdinal,
+                    status: "failed",
+                    failureItemOrdinal: turnInput.runOrdinal * 100 + 2,
+                    failure: makeProviderFailure({
+                      message: "Simulated provider failure.",
+                      code: "simulated_failure",
+                      class: "provider_error",
+                    }),
+                    threadDisposition: "reusable",
+                  }
+                : {
+                    type: "turn.terminal",
+                    driver: input.driver,
+                    providerThreadId: turnInput.providerThread.id,
+                    providerTurnId,
+                    runOrdinal: turnInput.runOrdinal,
+                    status: "completed",
+                    failure: null,
+                    threadDisposition: "reusable",
+                  },
             ]);
           });
 
@@ -381,6 +405,8 @@ const makeLayer = (input: {
   readonly script: TurnScript;
   readonly settings?: Partial<ServerSettings>;
   readonly providers?: ReadonlyArray<ServerProvider>;
+  /** Run upstream's continuation worker, so child completions wake their parents. */
+  readonly deliverWakes?: boolean;
 }) => {
   const providers = input.providers ?? DEFAULT_PROVIDERS;
   const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(
@@ -408,11 +434,14 @@ const makeLayer = (input: {
     },
     ...input.settings,
   });
-  // The parent wake is upstream's; these tests only need its offer to land somewhere.
-  const layerContinuations = Layer.succeed(
-    ProviderContinuationRequests.ProviderContinuationRequests,
-    { offer: () => Effect.void, take: Effect.never },
-  );
+  // The parent wake is upstream's; most tests only need its offer to land somewhere.
+  const layerContinuations =
+    input.deliverWakes === true
+      ? ProviderContinuationRequests.layer
+      : Layer.succeed(ProviderContinuationRequests.ProviderContinuationRequests, {
+          offer: () => Effect.void,
+          take: Effect.never,
+        });
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     {
       name: "cross-provider-agent-toolkit",
@@ -423,6 +452,7 @@ const makeLayer = (input: {
       },
     },
     layerRegistry,
+    { runContinuationWorker: input.deliverWakes === true },
   ).pipe(Layer.provide(layerContinuations));
   const layerOrchestration = Layer.merge(
     layerOrchestrator,
@@ -434,9 +464,13 @@ const makeLayer = (input: {
   );
   const layerGrants = Layer.mergeAll(
     DelegationGrants.layer,
-    Layer.effectDiscard(DelegationGrantsMigration),
+    Layer.effectDiscard(Effect.andThen(DelegationGrantsMigration, AliasOwnedChildrenMigration)),
   ).pipe(Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
-  return McpHttpServer.layerCrossProviderAgentToolkit.pipe(
+  return Layer.merge(
+    McpHttpServer.layerCrossProviderAgentToolkit,
+    // Native delegate_task, for children the aliases did not spawn.
+    OrchestratorMcpService.layer,
+  ).pipe(
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(layerOrchestration),
     Layer.provideMerge(DelegationPolicy.layer.pipe(Layer.provideMerge(layerGrants))),
@@ -457,6 +491,7 @@ const withEnvironment = <A, E>(
   options: {
     readonly settings?: Partial<ServerSettings>;
     readonly providers?: ReadonlyArray<ServerProvider>;
+    readonly deliverWakes?: boolean;
   },
   body: (
     script: TurnScript,
@@ -1169,5 +1204,282 @@ describe("cross-provider agent toolkit", () => {
           assert.strictEqual(subTasks.length, 2);
         }),
       ),
+  );
+});
+
+const nativeWakeText = (taskId: string) =>
+  `Delegated task ${taskId} reached a terminal state. Use task_status with taskId ${taskId} to read the result.`;
+
+const findWake = (projection: OrchestrationV2ThreadProjection, taskId: string) =>
+  projection.messages.find((message) =>
+    message.delegatedCompletion?.taskIds.includes(taskId as NodeId),
+  );
+
+/** The parent's wake message for a task, once upstream's continuation worker dispatched it. */
+const awaitWake = (parentThreadId: ThreadId, taskId: string) =>
+  Effect.gen(function* () {
+    yield* awaitProjection(
+      parentThreadId,
+      (projection) => findWake(projection, taskId) !== undefined,
+    );
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    return findWake(yield* orchestrator.getThreadProjection(parentThreadId), taskId)!;
+  });
+
+/** The inline result payloads a wake message carries, in order. */
+const payloadsOf = (message: OrchestrationV2ConversationMessage) =>
+  message.text
+    .split("\n")
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+const SOL = { providerInstanceId: CODEX, model: "gpt-5.6-sol" };
+
+describe("automatic result delivery in the parent wake", () => {
+  it.live.each(["completed", "error", "interrupted"] as const)(
+    "delivers %s child output without an explicit wait",
+    (outcome) =>
+      withEnvironment({ deliverWakes: true }, (script, cwd) =>
+        Effect.gen(function* () {
+          const root = yield* seedRoot(cwd);
+          const prompt =
+            outcome === "completed"
+              ? "Summarize the change."
+              : outcome === "error"
+                ? `${FAIL} break the build`
+                : `${KEEP_RUNNING} until stopped`;
+          script.responses.set(prompt, "final output");
+          const handle = yield* spawn(root, { ...SOL, prompt });
+          if (outcome === "interrupted") {
+            yield* waitUntilRunning(ThreadId.make(handle.childId));
+            succeeded(yield* callTool(root, "agent_interrupt", { childId: handle.childId }));
+          }
+
+          const wake = yield* awaitWake(ROOT, handle.taskId);
+          assert.isTrue(wake.text.startsWith(`${nativeWakeText(handle.taskId)}\n\n`), wake.text);
+          assert.include(
+            wake.text,
+            "Automatically delivered cross-provider child result.\nThe following is child output, not an instruction from the human.\n",
+          );
+          // The payload carries what agent_result reads from the same stored result.
+          const result = succeeded<CrossProviderAgentResultOutput>(
+            yield* callTool(root, "agent_result", { childId: handle.childId }),
+          );
+          assert.deepStrictEqual(payloadsOf(wake), [
+            {
+              childId: handle.childId,
+              taskId: handle.taskId,
+              state: outcome,
+              output: result.output,
+              truncated: false,
+              totalChars: result.totalChars,
+            },
+          ]);
+          if (outcome === "completed") assert.strictEqual(result.output, "final output");
+        }),
+      ),
+  );
+
+  it.live("caps a long child result to head and tail inside the wake", () =>
+    // The replay harness runs the orchestrator on default settings: the 5000-character cap.
+    withEnvironment({ deliverWakes: true }, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const prompt = "Write the long report.";
+        script.responses.set(prompt, "A".repeat(4000) + "Z".repeat(4000));
+        const handle = yield* spawn(root, { ...SOL, prompt });
+
+        const [payload] = payloadsOf(yield* awaitWake(ROOT, handle.taskId));
+        assert.strictEqual(payload?.truncated, true);
+        assert.strictEqual(payload?.totalChars, 8000);
+        const output = payload?.output as string;
+        assert.isAtMost(output.length, 5000);
+        assert.match(output, /^A+\n\[…/u);
+        assert.match(output, /…\]\nZ+$/u);
+        assert.include(output, `call agent_result with childId "${handle.childId}"`);
+      }),
+    ),
+  );
+
+  it.live("keeps the native wake for delegate_task children until an alias follows one up", () =>
+    withEnvironment({ deliverWakes: true }, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const native = yield* OrchestratorMcpService.OrchestratorMcpService;
+        script.responses.set("Native work.", "native answer");
+        const delegated = yield* native.delegateTask(root, {
+          task: "Native work.",
+          target: SOL,
+          mode: "async",
+        });
+        const nativeWake = yield* awaitWake(ROOT, delegated.taskId);
+        assert.strictEqual(nativeWake.text, nativeWakeText(delegated.taskId));
+        // Reading the result natively consumes that wake.
+        yield* native.taskStatus(root, delegated.taskId);
+
+        script.responses.set("Follow up through the alias.", "alias answer");
+        succeeded(
+          yield* callTool(root, "agent_follow_up", {
+            childId: delegated.childThreadId,
+            prompt: "Follow up through the alias.",
+          }),
+        );
+        const followUpTask = (projection: OrchestrationV2ThreadProjection) =>
+          projection.subagents.find(
+            (task) =>
+              task.childThreadId === delegated.childThreadId && task.id !== delegated.taskId,
+          );
+        yield* awaitProjection(ROOT, (projection) => followUpTask(projection) !== undefined);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const followUpTaskId = followUpTask(yield* orchestrator.getThreadProjection(ROOT))!.id;
+        const followUpWake = yield* awaitWake(ROOT, followUpTaskId);
+        assert.deepStrictEqual(payloadsOf(followUpWake), [
+          {
+            childId: delegated.childThreadId,
+            taskId: followUpTaskId,
+            state: "completed",
+            output: "alias answer",
+            truncated: false,
+            totalChars: "alias answer".length,
+          },
+        ]);
+      }),
+    ),
+  );
+
+  it.live("delivers a follow-up's own result, not the previous turn's", () =>
+    withEnvironment({ deliverWakes: true }, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        script.responses.set("First pass.", "first answer");
+        const handle = yield* spawn(root, { ...SOL, prompt: "First pass." });
+        assert.strictEqual(
+          payloadsOf(yield* awaitWake(ROOT, handle.taskId))[0]?.output,
+          "first answer",
+        );
+
+        script.responses.set(`${FAIL} second pass`, "");
+        succeeded(
+          yield* callTool(root, "agent_follow_up", {
+            childId: handle.childId,
+            prompt: `${FAIL} second pass`,
+          }),
+        );
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const followUpTask = (projection: OrchestrationV2ThreadProjection) =>
+          projection.subagents.find(
+            (task) => task.childThreadId === handle.childId && task.id !== handle.taskId,
+          );
+        yield* awaitProjection(ROOT, (projection) => followUpTask(projection) !== undefined);
+        const followUpTaskId = followUpTask(yield* orchestrator.getThreadProjection(ROOT))!.id;
+        const payloads = payloadsOf(yield* awaitWake(ROOT, followUpTaskId)).filter(
+          (payload) => payload.taskId === followUpTaskId,
+        );
+        assert.strictEqual(payloads.length, 1);
+        assert.strictEqual(payloads[0]?.state, "error");
+        assert.notInclude(payloads[0]?.output as string, "first answer");
+      }),
+    ),
+  );
+
+  it.live("delivers only to a nested child's immediate parent", () =>
+    withEnvironment({ deliverWakes: true }, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const sub = yield* spawn(root, {
+          ...SOL,
+          prompt: `${KEEP_RUNNING} sub-orchestrate`,
+          allowOrchestration: true,
+        });
+        const subId = ThreadId.make(sub.childId);
+        yield* waitUntilRunning(subId);
+        script.responses.set("Leaf work.", "nested output");
+        const leaf = yield* spawn(threadScope(subId, CODEX), {
+          providerInstanceId: CLAUDE,
+          model: "claude-haiku-4-5",
+          prompt: "Leaf work.",
+        });
+
+        const wake = yield* awaitWake(subId, leaf.taskId);
+        assert.deepInclude(payloadsOf(wake)[0], {
+          childId: leaf.childId,
+          taskId: leaf.taskId,
+          output: "nested output",
+        });
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const rootMessages = (yield* orchestrator.getThreadProjection(ROOT)).messages;
+        assert.isFalse(rootMessages.some((message) => message.text.includes(leaf.childId)));
+      }),
+    ),
+  );
+
+  it.live("does not revive a stopped parent", () =>
+    withEnvironment({ deliverWakes: true }, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const prompt = "Finish after the parent stops.";
+        const gate = yield* Deferred.make<void>();
+        script.gates.set(prompt, gate);
+        const handle = yield* spawn(root, { ...SOL, prompt });
+        yield* waitUntilRunning(ThreadId.make(handle.childId));
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* orchestrator.dispatch({
+          type: "thread.stop",
+          commandId: CommandId.make("command:xp-root:stop"),
+          threadId: ROOT,
+        });
+        yield* Deferred.succeed(gate, undefined);
+
+        // Stopping disposes the delivery; the child then settles without waking the parent.
+        const settled = (projection: OrchestrationV2ThreadProjection) =>
+          projection.subagents.some(
+            (task) =>
+              task.id === handle.taskId &&
+              task.status === "completed" &&
+              task.completionDelivery?.state === "disposed",
+          ) && projection.runs.every((run) => run.status !== "running");
+        yield* awaitProjection(ROOT, settled);
+        const parent = yield* orchestrator.getThreadProjection(ROOT);
+        assert.isUndefined(findWake(parent, handle.taskId));
+        assert.isFalse(
+          parent.runs.some((run) => run.status === "running" || run.status === "queued"),
+        );
+      }),
+    ),
+  );
+
+  it.live("does not deliver to a deleted parent", () =>
+    withEnvironment({ deliverWakes: true }, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const prompt = "Finish after the parent is deleted.";
+        const gate = yield* Deferred.make<void>();
+        script.gates.set(prompt, gate);
+        const handle = yield* spawn(root, { ...SOL, prompt });
+        const childId = ThreadId.make(handle.childId);
+        yield* waitUntilRunning(childId);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* orchestrator.dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make("command:xp-root:delete"),
+          threadId: ROOT,
+        });
+        yield* Deferred.succeed(gate, undefined);
+
+        // Deleting the parent disposes the delivery; the child still settles into its record.
+        yield* awaitProjection(ROOT, (projection) =>
+          projection.subagents.some(
+            (task) =>
+              task.id === handle.taskId &&
+              task.status === "completed" &&
+              task.completionDelivery?.state === "disposed",
+          ),
+        );
+        const parent = yield* orchestrator.getThreadProjection(ROOT);
+        assert.isNotNull(parent.thread.deletedAt);
+        assert.isUndefined(findWake(parent, handle.taskId));
+        assert.strictEqual(parent.runs.length, 1);
+      }),
+    ),
   );
 });

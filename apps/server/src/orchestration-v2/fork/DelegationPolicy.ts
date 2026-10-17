@@ -23,6 +23,8 @@ export class DelegationPolicy extends Context.Service<
       readonly parentThreadId: ThreadId;
       readonly childThreadId: ThreadId;
       readonly allowOrchestration: boolean;
+      /** Spawned through `agent_spawn`: its parent wakes carry the capped result inline. */
+      readonly aliasOwned?: boolean;
       /** A retry of an accepted delegation only replays it, so its depth was already admitted. */
       readonly replay: boolean;
     }) => Effect.Effect<void, OrchestratorMcpFailure>;
@@ -79,6 +81,9 @@ const make = Effect.gen(function* () {
             allowOrchestration: input.allowOrchestration,
           })
           .pipe(
+            Effect.andThen(
+              input.aliasOwned === true ? grants.markAliasOwned(input.childThreadId) : Effect.void,
+            ),
             Effect.mapError((error) =>
               failure(
                 "orchestration_error",

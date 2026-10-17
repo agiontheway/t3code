@@ -224,6 +224,7 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
       layerProviderSwitchServiceProvided,
       layerRunExecutionServiceProvided,
       ThreadForkService.layer,
+      DelegationGrants.layer, // fork: inline result in alias-owned completion wakes
     ),
   ),
 );
