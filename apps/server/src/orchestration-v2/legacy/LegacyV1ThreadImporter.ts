@@ -31,6 +31,13 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventSink from "../EventSink.ts";
+// fork: 0.0.45 cross-provider children keep their parent through the import.
+import {
+  legacySpawnLineage,
+  loadLegacySpawns,
+  recordLegacySpawnGrant,
+  type LegacySpawns,
+} from "../fork/LegacySpawnLineage.ts";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 
 const IMPORT_EVENT_PREFIX = "migration:v1";
@@ -186,7 +193,11 @@ function nullableDateTime(value: string | null): DateTime.Utc | null {
   return value === null ? null : dateTime(value);
 }
 
-function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
+function importedThread(
+  row: LegacyThreadRow,
+  // fork: v1 spawn rows, so legacy cross-provider children import as subagents.
+  spawns: LegacySpawns = new Map(),
+): OrchestrationV2AppThread {
   const threadId = ThreadId.make(row.thread_id);
   const modelSelection = modelSelectionFor(row);
   const branch = row.branch?.trim() || null;
@@ -220,11 +231,12 @@ function importedThread(row: LegacyThreadRow): OrchestrationV2AppThread {
     activeOrderKey: row.active_order_key?.trim() || null,
     activeProviderThreadId: null,
     historyOrigin: "v1_import",
-    lineage: {
+    // fork: a 0.0.45 spawn row maps to subagent lineage instead of a top-level thread.
+    lineage: Option.getOrElse(legacySpawnLineage(threadId, spawns), () => ({
       parentThreadId: null,
       relationshipToParent: null,
       rootThreadId: threadId,
-    },
+    })),
     forkedFrom: null,
     createdAt: dateTime(row.created_at),
     updatedAt: dateTime(row.updated_at),
@@ -585,8 +597,10 @@ const make = Effect.gen(function* () {
     `;
     let importedThreadCount = repairedThreadCount;
     let importedMessageCount = 0;
+    // fork: read 0.0.45 spawn rows once, only when there is something to import.
+    const spawns: LegacySpawns = rows.length === 0 ? new Map() : yield* loadLegacySpawns(sql);
     for (const row of rows) {
-      const thread = importedThread(row);
+      const thread = importedThread(row, spawns);
       const previews = yield* listShellMessages(thread.id);
       const events: Array<OrchestrationV2DomainEvent> = [
         {
@@ -628,6 +642,12 @@ const make = Effect.gen(function* () {
             { discard: true },
           );
           yield* eventSink.write({ events });
+          // fork: the legacy child's depth and orchestration grant.
+          yield* recordLegacySpawnGrant(sql, {
+            threadId: thread.id,
+            spawns,
+            createdAt: row.created_at,
+          });
           yield* sql`
             INSERT INTO orchestration_v2_legacy_imports (
               thread_id,
