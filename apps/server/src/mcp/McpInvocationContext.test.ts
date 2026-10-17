@@ -96,3 +96,41 @@ it.effect("refuses thread-owned capabilities to a caller signed in from outside 
     expect(error.threadId).toBeUndefined();
   });
 });
+
+// fork: heartbeat tools gate on their own thread-only capability.
+it.effect("treats heartbeat as an independent thread capability", () => {
+  const invocation: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    requestNamespace: "provider-session-1",
+    thread: {
+      threadId: ThreadId.make("thread-1"),
+      providerSessionId: "provider-session-1",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
+    capabilities: new Set(["heartbeat"]),
+    issuedAt: 1,
+  };
+
+  return Effect.gen(function* () {
+    const scope = yield* McpInvocationContext.requireThreadMcpCapability("heartbeat").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+    );
+    expect(scope).toBe(invocation);
+
+    const error = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.flip,
+    );
+    expect(error).toBeInstanceOf(PreviewAutomationUnavailableError);
+
+    const withoutThread = yield* McpInvocationContext.requireThreadMcpCapability("heartbeat").pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        ...invocation,
+        thread: undefined,
+      }),
+      Effect.flip,
+    );
+    expect(withoutThread).toBeInstanceOf(McpCapabilityUnavailableError);
+  });
+});

@@ -34,6 +34,8 @@ import * as McpHttpServer from "../../McpHttpServer.ts";
 import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
+import { HeartbeatService } from "../../../heartbeat/HeartbeatService.ts"; // fork
+import * as DelegationGrants from "../../../orchestration-v2/fork/DelegationGrants.ts"; // fork
 
 const layerStubServices = Layer.mergeAll(
   Layer.mock(Orchestrator.OrchestratorV2)({}),
@@ -57,6 +59,9 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
   Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
   Layer.mock(ThreadSearch.ThreadSearch)({}),
+  // fork: heartbeat toolkit services.
+  Layer.mock(HeartbeatService)({}),
+  Layer.mock(DelegationGrants.DelegationGrants)({}),
 );
 
 const ToolsListPayload = Schema.fromJsonString(
@@ -143,6 +148,15 @@ it.effect("production mcp layer lists worktree tools over http", () =>
       // than replacing them.
       expect(toolNames).toContain("preview_status");
       expect(toolNames).toContain("delegate_task");
+      // fork: thread heartbeat tools register on the same server.
+      expect(toolNames).toEqual(
+        expect.arrayContaining([
+          "t3_heartbeat_create",
+          "t3_heartbeat_list",
+          "t3_heartbeat_delete",
+          "t3_heartbeat_wakeup",
+        ]),
+      );
 
       // The handoff tool mutates thread state, reaches the network (origin
       // fetch), and runs project setup scripts, so its MCP hints must not
