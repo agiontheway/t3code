@@ -233,7 +233,7 @@ try {
     },
   );
 
-  // Retain pinned dependencies: resolving afresh can outgrow version-specific patches.
+  // fork: retain pinned dependencies: resolving afresh can outgrow version-specific patches.
   NodeChildProcess.execFileSync(
     "vp",
     ["install", "--lockfile-only", "--ignore-scripts", "--no-frozen-lockfile"],

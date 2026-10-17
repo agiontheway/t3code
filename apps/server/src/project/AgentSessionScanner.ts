@@ -627,7 +627,7 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const baseDir = path.resolve(serverConfig.baseDir);
   const worktreesDir = path.resolve(serverConfig.worktreesDir);
-  // Compare resolved candidates against resolved roots as well: macOS aliases
+  // fork: compare resolved candidates against resolved roots as well: macOS aliases
   // /var to /private/var, and a configured T3 home can itself be a symlink.
   const realBaseDir = yield* fileSystem.realPath(baseDir).pipe(Effect.orElseSucceed(() => baseDir));
   const realWorktreesDir = yield* fileSystem
@@ -662,6 +662,7 @@ export const make = Effect.gen(function* () {
     normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
       normalizeForWorktreeMatch(baseDir, foldWorktreeCase),
     ) ||
+    // fork: also match the realpath'd T3 home and worktrees dirs.
     normalizeForWorktreeMatch(candidatePath, foldWorktreeCase).startsWith(
       normalizeForWorktreeMatch(realBaseDir, foldWorktreeCase),
     ) ||

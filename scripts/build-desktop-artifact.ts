@@ -3533,6 +3533,7 @@ export const validateWindowsPackagedPayload = Effect.fn(
   return { packagedAppDir, fileCount, unpackedFiles } as const;
 });
 
+// fork: opt-in Connect configuration gate for fork installer builds.
 export class DesktopConnectConfigMissingError extends Schema.TaggedError<DesktopConnectConfigMissingError>()(
   "DesktopConnectConfigMissingError",
   { missingKeys: Schema.Array(Schema.String) },
@@ -3561,6 +3562,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
+  // fork: fail before packaging when a Connect-enabled build lacks public config.
   if (yield* Config.Boolean("T3CODE_DESKTOP_REQUIRE_CONNECT").pipe(Config.withDefault(false))) {
     yield* requireDesktopConnectConfig(loadRepoEnv({ repoRoot }));
   }
