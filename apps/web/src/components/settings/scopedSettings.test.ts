@@ -369,6 +369,33 @@ describe("scoped settings writes", () => {
     });
   });
 
+  it("keeps cross-provider settings on the selected environment and refuses project overrides", async () => {
+    const patch = {
+      enableCrossProviderAgentAccess: true,
+      crossProviderAgentMaxDepth: 3,
+      crossProviderAgentRoutes: {},
+    };
+    const persistServer = vi.fn().mockResolvedValue({ _tag: "Success" });
+    const persistClient = vi.fn();
+    await persistScopedSettingsPatch(
+      planScopedSettingsPatch(named, environments, patch),
+      persistServer,
+      persistClient,
+    );
+    expect(persistServer).toHaveBeenCalledExactlyOnceWith({
+      environmentId: server.environmentId,
+      input: { patch },
+    });
+    expect(persistClient).not.toHaveBeenCalled();
+    for (const scope of [project, checkout]) {
+      expect(planScopedSettingsPatch(scope, environments, patch)).toMatchObject({
+        serverWrites: [],
+        unavailableReason:
+          "This setting is environment-wide and cannot be overridden by a project.",
+      });
+    }
+  });
+
   it("keeps each project's other cleanup rules when changing one rule across machines", () => {
     const machine = environment("Laptop", {
       settings: {

@@ -725,6 +725,31 @@ export const SETTINGS_SEARCH_ITEMS = [
     targetId: "devices",
     searchTerms: ["xcode android studio sdk avd runtime"],
   },
+  // fork: cross-provider agent settings (Integrations -> Agents).
+  {
+    id: "cross-provider-agent-access",
+    title: "Cross-provider agent access",
+    to: "/settings/integrations",
+    searchTerms: ["agents spawn child threads other providers codex claude delegate quota"],
+  },
+  {
+    id: "cross-provider-agent-max-depth",
+    title: "Max orchestration depth",
+    to: "/settings/integrations",
+    searchTerms: ["agents nested sub-orchestrator fan out levels"],
+  },
+  {
+    id: "cross-provider-agent-output-cap",
+    title: "Child output cap",
+    to: "/settings/integrations",
+    searchTerms: ["agents result characters truncated head tail"],
+  },
+  {
+    id: "cross-provider-agent-routes",
+    title: "Cross-provider routes",
+    to: "/settings/integrations",
+    searchTerms: ["agents allowed provider instances models eligibility restore defaults"],
+  },
   {
     id: "browser-profiles",
     title: "Browser profiles",

@@ -103,6 +103,7 @@ import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { isMacPlatform } from "../../lib/utils";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
+import { withoutSubagentThreads } from "../subagentThreadLists.logic";
 import { formatRelativeTimeLabel } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -664,6 +665,22 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
         ? ["Agent browser access"]
         : []),
+      // fork: cross-provider agent settings.
+      ...(settings.enableCrossProviderAgentAccess !==
+      DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess
+        ? ["Cross-provider agent access"]
+        : []),
+      ...(settings.crossProviderAgentMaxDepth !==
+      DEFAULT_UNIFIED_SETTINGS.crossProviderAgentMaxDepth
+        ? ["Max orchestration depth"]
+        : []),
+      ...(settings.crossProviderAgentOutputCapChars !==
+      DEFAULT_UNIFIED_SETTINGS.crossProviderAgentOutputCapChars
+        ? ["Child output cap"]
+        : []),
+      ...(Object.keys(settings.crossProviderAgentRoutes).length > 0
+        ? ["Cross-provider routes"]
+        : []),
     ],
     [
       isTextGenerationModelDirty,
@@ -681,6 +698,10 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.diffColorScheme,
       settings.chatWidth,
       settings.enableAgentBrowserAccess,
+      settings.enableCrossProviderAgentAccess,
+      settings.crossProviderAgentMaxDepth,
+      settings.crossProviderAgentOutputCapChars,
+      settings.crossProviderAgentRoutes,
       settings.confirmQuit,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
@@ -861,6 +882,11 @@ export function useSettingsRestore(onRestored?: () => void) {
       // name, so a user restoring defaults is told the agent regains access
       // rather than discovering it later.
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
+      // fork: cross-provider agent settings.
+      enableCrossProviderAgentAccess: DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess,
+      crossProviderAgentMaxDepth: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentMaxDepth,
+      crossProviderAgentOutputCapChars: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentOutputCapChars,
+      crossProviderAgentRoutes: DEFAULT_UNIFIED_SETTINGS.crossProviderAgentRoutes,
     });
     onRestored?.();
   }, [
@@ -3470,8 +3496,11 @@ export function ArchivedThreadsPanel() {
           ),
       ),
     );
+    // fork: archived subagent threads stay reachable from their parent's Lineage only.
     const threads = archivedSnapshots.flatMap(({ environmentId, snapshot }) =>
-      snapshot.threads.map((thread) => presentThreadShell(environmentId, thread)),
+      withoutSubagentThreads(snapshot.threads).map((thread) =>
+        presentThreadShell(environmentId, thread),
+      ),
     );
 
     const archivedProjects = Array.from(projectsByEnvironmentAndId.values());
