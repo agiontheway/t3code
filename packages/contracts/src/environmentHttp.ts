@@ -773,8 +773,7 @@ class EnvironmentWebhooksHttpApi extends HttpApiGroup.make("webhooks")
   .add(HttpApiEndpoint.get("webhookGet", WEBHOOK_PATH, webhookEndpoint)) {}
 
 // fork: Signal command integration. `trigger` skips environment auth: the
-// Signal service checks the binding token sent as the bearer header. The
-// group joins `EnvironmentHttpApi` together with its server handler mount.
+// Signal service checks the binding token sent as the bearer header.
 export const SignalCommandName = Schema.String.check(Schema.isPattern(/^\/[a-z][a-z0-9-]{0,31}$/));
 export const SignalCommandRoute = Schema.Struct({
   command: SignalCommandName,
@@ -851,6 +850,7 @@ export class EnvironmentSignalHttpApi extends HttpApiGroup.make("signal")
   ) {}
 
 export class EnvironmentHttpApi extends HttpApi.make("environment")
+  .add(EnvironmentSignalHttpApi) // fork
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
   .add(EnvironmentMcpOAuthHttpApi)
