@@ -30,6 +30,18 @@ Client and bundled-server builds embed the public values, so set them before bui
 EAS preview and production environments need the publishable key, JWT template name, and relay URL.
 Bundled servers also accept runtime overrides for operator-managed deployments.
 
+For desktop artifacts that must support Connect, set `T3CODE_DESKTOP_REQUIRE_CONNECT=true`
+when running `scripts/build-desktop-artifact.ts`. The build then fails before packaging if any
+of the four public values is missing. Build without `--skip-build` after changing configuration:
+existing bundles retain their previously embedded values.
+
+Git worktrees do not inherit ignored `.env` files. Provision these four public settings in each
+build worktree and inside any Linux build container; do not copy relay secrets. Check process
+variables and `.env.local` for overrides. Before distributing the artifact, inspect its extracted
+renderer, desktop main bundle, and server bundle for the expected public configuration, then
+verify the sign-in entry point in a client. A working local `.env` does not repair an already-built
+installer.
+
 Copy `infra/relay/.env.example` to `infra/relay/.env` for relay deployment settings.
 Deploy `prod` before personal stages because it owns the retained database that their branches
 depend on. The stack's `PublishClientConfig` action writes the resulting relay URL back to the root `.env`.

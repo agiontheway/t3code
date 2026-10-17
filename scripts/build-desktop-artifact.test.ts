@@ -17,6 +17,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   BundleNotSelfContainedError,
+  requireDesktopConnectConfig,
   BuildCommandFailedError,
   parseWslRuntimeArchiveMembers,
   DesktopDmgBackgroundSourceMissingError,
@@ -2562,3 +2563,27 @@ it("ignores trailing separators", () => {
     ancestorNodeModulesPaths("C:\\tmp\\probe\\app", "\\"),
   );
 });
+
+it.effect("Connect config rejects missing settings without exposing values", () =>
+  Effect.gen(function* () {
+    const result = yield* requireDesktopConnectConfig({
+      T3CODE_CLERK_PUBLISHABLE_KEY: "public-test-key",
+      T3CODE_CLERK_JWT_TEMPLATE: "  ",
+      T3CODE_RELAY_URL: "https://relay.example.com",
+    }).pipe(Effect.flip);
+    assert.deepEqual(result.missingKeys, [
+      "T3CODE_CLERK_JWT_TEMPLATE",
+      "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
+    ]);
+    assert.notInclude(result.message, "public-test-key");
+  }),
+);
+
+it.effect("Connect config accepts all four public settings", () =>
+  requireDesktopConnectConfig({
+    T3CODE_CLERK_PUBLISHABLE_KEY: "public-test-key",
+    T3CODE_CLERK_JWT_TEMPLATE: "t3-relay",
+    T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: "public-client-id",
+    T3CODE_RELAY_URL: "https://relay.example.com",
+  }),
+);

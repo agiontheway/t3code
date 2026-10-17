@@ -3533,12 +3533,37 @@ export const validateWindowsPackagedPayload = Effect.fn(
   return { packagedAppDir, fileCount, unpackedFiles } as const;
 });
 
+export class DesktopConnectConfigMissingError extends Schema.TaggedError<DesktopConnectConfigMissingError>()(
+  "DesktopConnectConfigMissingError",
+  { missingKeys: Schema.Array(Schema.String) },
+) {
+  override get message(): string {
+    return `Connect-enabled desktop build is missing public configuration: ${this.missingKeys.join(", ")}. Set it before rebuilding; see docs/operations/connect-setup.md.`;
+  }
+}
+
+/** Opt-in release check; ordinary builds may deliberately omit T3 Connect. */
+export function requireDesktopConnectConfig(env: Readonly<Record<string, string | undefined>>) {
+  const missingKeys = [
+    "T3CODE_CLERK_PUBLISHABLE_KEY",
+    "T3CODE_CLERK_JWT_TEMPLATE",
+    "T3CODE_CLERK_CLI_OAUTH_CLIENT_ID",
+    "T3CODE_RELAY_URL",
+  ].filter((key) => !env[key]?.trim());
+  return missingKeys.length > 0
+    ? Effect.fail(new DesktopConnectConfigMissingError({ missingKeys }))
+    : Effect.void;
+}
+
 const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   options: ResolvedBuildOptions,
 ) {
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
+  if (yield* Config.Boolean("T3CODE_DESKTOP_REQUIRE_CONNECT").pipe(Config.withDefault(false))) {
+    yield* requireDesktopConnectConfig(loadRepoEnv({ repoRoot }));
+  }
   const hostPlatform = yield* HostProcess.Platform;
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);

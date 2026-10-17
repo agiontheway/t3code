@@ -349,8 +349,8 @@ describe("WSL runtime cache", () => {
   });
 
   it("parses only absolute Linux runtime paths", () => {
-    expect(parseWslRuntimeRoot("runtimeRoot:/home/josh/.t3/wsl-runtime/1.2.3-x64\n")).toBe(
-      "/home/josh/.t3/wsl-runtime/1.2.3-x64",
+    expect(parseWslRuntimeRoot("runtimeRoot:/home/user/.t3/wsl-runtime/1.2.3-x64\n")).toBe(
+      "/home/user/.t3/wsl-runtime/1.2.3-x64",
     );
     expect(parseWslRuntimeRoot("runtimeRoot:relative/path\n")).toBeNull();
     expect(parseWslRuntimeRoot("noise\n")).toBeNull();
@@ -819,8 +819,8 @@ describe("parseToolchainReport", () => {
 
 describe("parseNodePath", () => {
   it("extracts the absolute node path from a nodePath: line", () => {
-    const stdout = "nodePath:/home/josh/.nvm/versions/node/v22.16.0/bin/node";
-    expect(parseNodePath(stdout)).toBe("/home/josh/.nvm/versions/node/v22.16.0/bin/node");
+    const stdout = "nodePath:/home/user/.nvm/versions/node/v22.16.0/bin/node";
+    expect(parseNodePath(stdout)).toBe("/home/user/.nvm/versions/node/v22.16.0/bin/node");
   });
 
   it("returns null when node was not found (empty value after prefix)", () => {

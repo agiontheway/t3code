@@ -1007,6 +1007,38 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
       }),
     );
 
+    // fork: macOS reports /var temp dirs as /private/var, and a T3 home can be a symlink.
+    it.effect("excludes sandboxes when the configured T3 home is itself a symlink", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const realBaseDir = yield* makeTempDir("t3code-scanner-base-");
+        const linkParent = yield* makeTempDir("t3code-scanner-links-");
+        const fileSystem = yield* FileSystem.FileSystem;
+
+        // The config names the symlink; the session records the resolved path.
+        const configBaseDir = path.join(linkParent, "t3-home");
+        yield* fileSystem.symlink(realBaseDir, configBaseDir);
+        const worktreeCwd = path.join(
+          yield* fileSystem.realPath(realBaseDir),
+          "worktrees",
+          "t3code",
+          "wt-4",
+        );
+        yield* fileSystem.makeDirectory(worktreeCwd, { recursive: true });
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-slug", "a.jsonl"),
+          contents: claudeSessionLine(worktreeCwd),
+          mtimeMs: Date.parse("2026-01-01T00:00:00.000Z"),
+        });
+
+        const result = yield* runScan({ claudeHomePath, codexHomePath, configBaseDir });
+
+        expect(result.candidates).toEqual([]);
+      }),
+    );
+
     it.effect("finds the cwd on a later line when the first records carry none", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;

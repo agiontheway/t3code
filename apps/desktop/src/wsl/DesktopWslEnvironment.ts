@@ -105,7 +105,7 @@ export class DesktopWslEnvironment extends Context.Service<
       windowsPath: string,
     ) => Effect.Effect<Option.Option<string>>;
     // Resolves the user's Linux home dir inside the chosen distro (e.g.
-    // "/home/josh"). Used by the folder picker to expand `~` correctly.
+    // "/home/user"). Used by the folder picker to expand `~` correctly.
     readonly getUserHome: (distro: string | null) => Effect.Effect<Option.Option<string>>;
     // Resolves the WSL distro's IPv4 address on the WSL vEthernet adapter
     // (e.g. "172.x.x.x"). The orchestrator uses this for the WSL backend's
