@@ -13,7 +13,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
@@ -33,10 +33,11 @@ const crypto = (() => {
   });
   return {
     ...base,
-    randomUUIDv4: Effect.sync(() => {
-      counter += 1;
-      return `${counter.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
-    }),
+    randomUUIDv4: (() =>
+      Effect.sync(() => {
+        counter += 1;
+        return `${counter.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
+      })) as Crypto.Crypto["randomUUIDv4"],
   } satisfies Crypto.Crypto;
 })();
 
@@ -47,12 +48,12 @@ it.effect("reserves due work as pending without pretending admission or delivery
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
       yield* sql`
-        INSERT INTO projection_threads (
-          thread_id, project_id, title, model_selection_json, created_at, updated_at
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+          created_at, updated_at, payload_json
         ) VALUES (
-          ${THREAD_ID}, 'heartbeat-project', 'Heartbeat reactor',
-          '{"instanceId":"codex","model":"gpt-5"}',
-          '2026-09-17T10:00:00.000Z', '2026-09-17T10:00:00.000Z'
+          ${THREAD_ID}, 'heartbeat-project', 'Heartbeat reactor', 'codex', 'full-access',
+          'default', '2026-09-17T10:00:00.000Z', '2026-09-17T10:00:00.000Z', '{}'
         )
       `;
 
@@ -95,12 +96,12 @@ it.effect("reconciles a wall-clock jump within one second without rescanning sto
       yield* runMigrations();
       const sql = yield* SqlClient.SqlClient;
       yield* sql`
-        INSERT INTO projection_threads (
-          thread_id, project_id, title, model_selection_json, created_at, updated_at
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+          created_at, updated_at, payload_json
         ) VALUES (
-          ${THREAD_ID}, 'heartbeat-project', 'Heartbeat reactor',
-          '{"instanceId":"codex","model":"gpt-5"}',
-          '2026-09-17T10:00:00.000Z', '2026-09-17T10:00:00.000Z'
+          ${THREAD_ID}, 'heartbeat-project', 'Heartbeat reactor', 'codex', 'full-access',
+          'default', '2026-09-17T10:00:00.000Z', '2026-09-17T10:00:00.000Z', '{}'
         )
       `;
 

@@ -5,8 +5,6 @@ import {
   HeartbeatJobId,
   HeartbeatPrompt,
   HeartbeatTimeZone,
-  OrchestrationThreadShell,
-  ProjectId,
   ProviderInstanceId,
   ThreadId,
   type HeartbeatServiceError,
@@ -14,25 +12,27 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
-import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HeartbeatService } from "../../../heartbeat/HeartbeatService.ts";
-import type { Tool } from "effect/unstable/ai";
+import type { Tool } from "effect/ai";
 
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { HeartbeatService } from "../../../heartbeat/HeartbeatService.ts";
+import * as DelegationGrants from "../../../orchestration-v2/fork/DelegationGrants.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import { HeartbeatToolkitHandlersLive } from "./handlers.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as McpToolAccessTestkit from "../../McpToolAccess.testkit.ts";
+import * as HeartbeatHandlers from "./handlers.ts";
 import { HeartbeatToolkit } from "./tools.ts";
 
 const THREAD_ID = ThreadId.make("thread-bound-to-credential");
+const PARENT_THREAD_ID = ThreadId.make("thread-parent");
 const JOB_ID = HeartbeatJobId.make("deadbeef");
 const PROMPT = HeartbeatPrompt.make("continue");
 const CRON = HeartbeatCronExpression.make("0 * * * *");
 const TIME_ZONE = HeartbeatTimeZone.make("Europe/London");
-const PROJECT_ID = ProjectId.make("project-heartbeat-toolkit");
-const decodeThreadShell = Schema.decodeUnknownSync(OrchestrationThreadShell);
 
 type Call = {
   readonly method: "create" | "list" | "delete" | "wakeup";
@@ -44,9 +44,13 @@ const invocation = (
   capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
 ): McpInvocationContext.McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
-  threadId: THREAD_ID,
-  providerSessionId: "provider-session-1",
-  providerInstanceId: ProviderInstanceId.make("codex"),
+  requestNamespace: "provider-session-1",
+  thread: {
+    threadId: THREAD_ID,
+    providerSessionId: "provider-session-1",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  client: undefined,
   capabilities: new Set(capabilities),
   issuedAt: 1,
 });
@@ -80,7 +84,8 @@ const makeHarness = Effect.fn("makeHeartbeatToolkitHarness")(function* (
   options: {
     readonly createFailure?: HeartbeatServiceError;
     readonly enabled?: boolean;
-    readonly spawn?: { readonly allowOrchestration: boolean };
+    /** A delegated child; `allowOrchestration` is its grant row, none when undefined. */
+    readonly child?: { readonly allowOrchestration?: boolean };
   } = {},
 ) {
   const calls = yield* Ref.make<ReadonlyArray<Call>>([]);
@@ -109,46 +114,43 @@ const makeHarness = Effect.fn("makeHeartbeatToolkitHarness")(function* (
     activateOnAcceptedTurn: () => Effect.void,
     cancelRelative: () => Effect.void,
     cancelThread: () => Effect.void,
-    setOccurrenceOutcome: (_occurrenceId, _outcome) => Effect.void,
+    setOccurrenceOutcome: () => Effect.void,
   });
-  const thread = decodeThreadShell({
-    id: THREAD_ID,
-    projectId: PROJECT_ID,
-    title: "Heartbeat toolkit test",
-    modelSelection: { instanceId: "codex", model: "gpt-5" },
-    runtimeMode: "full-access",
-    branch: null,
-    worktreePath: null,
-    ...(options.spawn
-      ? {
-          spawn: {
-            parentThreadId: "thread-parent",
-            allowOrchestration: options.spawn.allowOrchestration,
-            depth: 1,
-            taskId: "xp-agent:heartbeat-toolkit-test",
+  const live = McpToolAccessTestkit.liveThreadShell(THREAD_ID);
+  const thread =
+    options.child === undefined
+      ? live
+      : {
+          ...live,
+          creationSource: "mcp" as const,
+          lineage: {
+            rootThreadId: PARENT_THREAD_ID,
+            parentThreadId: PARENT_THREAD_ID,
+            relationshipToParent: "subagent" as const,
           },
-        }
-      : {}),
-    latestTurn: null,
-    createdAt: "2026-09-17T12:00:00.000Z",
-    updatedAt: "2026-09-17T12:00:00.000Z",
-    session: null,
-    latestUserMessageAt: null,
-    hasPendingApprovals: false,
-    hasPendingUserInput: false,
-    hasActionableProposedPlan: false,
-  });
+        };
+  const grant =
+    options.child?.allowOrchestration === undefined
+      ? Option.none()
+      : Option.some({
+          childThreadId: THREAD_ID,
+          parentThreadId: PARENT_THREAD_ID,
+          depth: 1,
+          allowOrchestration: options.child.allowOrchestration,
+          createdAt: "2026-09-17T12:00:00.000Z",
+        });
   const dependencies = Layer.mergeAll(
     Layer.succeed(HeartbeatService, service),
-    Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
-      getThreadShellById: () => Effect.succeedSome(thread),
+    Layer.mock(ThreadManagementService.ThreadManagementService)({
+      getThreadShell: () => Effect.succeed(thread),
     }),
-    ServerSettings.ServerSettingsService.layerTest({
-      enableHeartbeatAccess: options.enabled ?? true,
-    }),
+    Layer.mock(DelegationGrants.DelegationGrants)({ read: () => Effect.succeed(grant) }),
+    ServerSettings.layerTest({ enableHeartbeatAccess: options.enabled ?? true }),
   );
   const toolkit = yield* HeartbeatToolkit.pipe(
-    Effect.provide(HeartbeatToolkitHandlersLive.pipe(Layer.provide(dependencies))),
+    Effect.provide(
+      McpToolAccess.HandlersLayer.layer(HeartbeatHandlers.layer).pipe(Layer.provide(dependencies)),
+    ),
   );
   const call = <Name extends keyof typeof HeartbeatToolkit.tools>(
     name: Name,
@@ -235,7 +237,7 @@ describe("heartbeat toolkit handlers", () => {
 
   it.effect("allows a currently orchestration-enabled child to call the service", () =>
     Effect.gen(function* () {
-      const harness = yield* makeHarness({ spawn: { allowOrchestration: true } });
+      const harness = yield* makeHarness({ child: { allowOrchestration: true } });
       const result = yield* harness.call("t3_heartbeat_list", {});
       expect(result).toEqual({ jobs: [createResult] });
       expect(yield* Ref.get(harness.calls)).toEqual([{ method: "list", threadId: THREAD_ID }]);
@@ -265,13 +267,15 @@ describe("heartbeat toolkit handlers", () => {
       });
       expect(yield* Ref.get(disabled.calls)).toEqual([]);
 
-      const leaf = yield* makeHarness({ spawn: { allowOrchestration: false } });
-      const leafError = yield* leaf.call("t3_heartbeat_list", {}).pipe(Effect.flip);
-      expect(leafError).toMatchObject({
-        _tag: "McpCapabilityUnavailableError",
-        capability: "heartbeat",
-      });
-      expect(yield* Ref.get(leaf.calls)).toEqual([]);
+      for (const child of [{ allowOrchestration: false }, {}]) {
+        const leaf = yield* makeHarness({ child });
+        const leafError = yield* leaf.call("t3_heartbeat_list", {}).pipe(Effect.flip);
+        expect(leafError).toMatchObject({
+          _tag: "McpCapabilityUnavailableError",
+          capability: "heartbeat",
+        });
+        expect(yield* Ref.get(leaf.calls)).toEqual([]);
+      }
     }),
   );
 });

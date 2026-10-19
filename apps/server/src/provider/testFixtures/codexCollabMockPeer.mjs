@@ -1,6 +1,6 @@
-// Minimal codex app-server stand-in for runtime-level collab tests.
-// Speaks just enough of the protocol for CodexSessionRuntime to start a
-// session, using REAL captured responses (codexMultiAgentWire.json), then
+// Minimal codex app-server stand-in, spawned as the Codex binary by the
+// provider readiness probe tests. Answers the handshake and, for session
+// requests, returns REAL captured responses (codexMultiAgentWire.json), then
 // replays a scripted multi-agent notification sequence read from the
 // T3_CODEX_COLLAB_SCRIPT env var (a JSON file path) when the first turn
 // starts. Runs as a plain Node process — stdlib only.
@@ -103,14 +103,6 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/start") {
-    // Separate flag: the collab scripts assert the recorded list holds only
-    // child thread/resume calls, so root start params are opt-in.
-    if (script.recordThreadStart) {
-      NodeFS.appendFileSync(
-        `${process.env.T3_CODEX_COLLAB_SCRIPT}.requests`,
-        `${JSON.stringify({ method, params: message.params })}\n`,
-      );
-    }
     write({ id, result: fixture.responses.threadStart });
     return;
   }
@@ -171,12 +163,6 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "turn/start") {
-    if (script.recordTurnStart) {
-      NodeFS.appendFileSync(
-        `${process.env.T3_CODEX_COLLAB_SCRIPT}.requests`,
-        `${JSON.stringify({ method, params: message.params })}\n`,
-      );
-    }
     const turnId = script.turnIds?.[turnStartCount];
     const turn = turnId
       ? { ...fixture.responses.turnStart.turn, id: turnId }

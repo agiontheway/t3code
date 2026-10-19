@@ -8,11 +8,12 @@
  * schema is always up to date before the application starts.
  */
 
-import * as Migrator from "effect/unstable/sql/Migrator";
+import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
-import ProjectionThreadsSpawn from "./ForkMigrations/001_ProjectionThreadsSpawn.ts";
-import HeartbeatJobs from "./ForkMigrations/002_HeartbeatJobs.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
+// fork: the fork's own migration ledger and its legacy id-50 repair.
+import { repairLegacyForkMigration50, runForkMigrations } from "./ForkMigrationLedger.ts";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -69,6 +70,14 @@ import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
 import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
+import Migration0055 from "./Migrations/055_OrchestrationV2.ts";
+import Migration0056 from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
+import Migration0057 from "./Migrations/057_ScheduledTaskWebhooks.ts";
+import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
+import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
+import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
+import Migration0061 from "./Migrations/061_PullRequestReviewGuides.ts";
+import Migration0062 from "./Migrations/062_ThreadFailureLookupIndex.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -80,7 +89,7 @@ import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledA
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-const migrationEntries = [
+export const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -135,6 +144,16 @@ const migrationEntries = [
   [52, "ProjectionThreadTitleState", Migration0052],
   [53, "PullRequestFilesViewed", Migration0053],
   [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
+  // Released as 53 and 54 in V2 previews; reconcileV2PreviewMigration preserves their ledger.
+  // Preserve this migration's schema. Future V2 schema changes need new migrations.
+  [55, "OrchestrationV2", Migration0055],
+  [56, "RemoveRedundantProjectionIndexes", Migration0056],
+  [57, "ScheduledTaskWebhooks", Migration0057],
+  [58, "WebhookRelayDeliveries", Migration0058],
+  [59, "McpAppModelContext", Migration0059],
+  [60, "ThreadSnapshotWindowIndexes", Migration0060],
+  [61, "PullRequestReviewGuides", Migration0061],
+  [62, "ThreadFailureLookupIndex", Migration0062],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -148,6 +167,48 @@ const makeMigrationLoader = (throughId?: number) =>
     ),
   );
 
+// V2's schema migrations start at 55 after the legacy schema migrations.
+const FIRST_V2_MIGRATION_ID = 55;
+
+/**
+ * Fail before migrating when the migrator would skip one of V2's own
+ * migrations. It skips every id up to the highest recorded one, whatever name
+ * was recorded, so a database that took a V2 id for another migration would
+ * start without V2's schema and fail on first use. Earlier ids keep the
+ * warning below: databases with a site-local migration there still work.
+ */
+const assertV2MigrationsCanRun = Effect.fn("assertV2MigrationsCanRun")(function* (
+  throughId?: number,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) return;
+  const recorded = yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+  }>`SELECT migration_id, name FROM effect_sql_migrations`;
+  const latestRecordedId = Math.max(0, ...recorded.map((row) => row.migration_id));
+  const recordedNames = new Map(recorded.map((row) => [row.migration_id, row.name]));
+  const skipped = migrationEntries.flatMap(([id, name]) => {
+    if (
+      id < FIRST_V2_MIGRATION_ID ||
+      id > latestRecordedId ||
+      (throughId !== undefined && id > throughId)
+    )
+      return [];
+    const recordedName = recordedNames.get(id);
+    if (recordedName === name) return [];
+    return [`${id}_${name} (recorded: ${recordedName ?? "nothing"})`];
+  });
+  if (skipped.length === 0) return;
+  return yield* new Migrator.MigrationError({
+    kind: "BadState",
+    message: `This database's migration history would skip required schema migrations: ${skipped.join(", ")}. The migrator skips every id up to the highest recorded id (${latestRecordedId}), regardless of name. It was probably written by a different build. Start the build that wrote it, or report this migration history so an upgrade path can be added.`,
+  });
+});
+
 /**
  * Migrator run function - no schema dumping needed
  * Uses the base Migrator.make without platform dependencies
@@ -155,7 +216,7 @@ const makeMigrationLoader = (throughId?: number) =>
 const run = Migrator.make({});
 
 export interface RunMigrationsOptions {
-  /** Historical upstream schema boundary for migration tests; fork migrations run on full startup. */
+  // fork: fork migrations run only on full startup, so a bounded run stays a historical schema.
   readonly toMigrationInclusive?: number | undefined;
 }
 
@@ -172,93 +233,52 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const sql = yield* SqlClient.SqlClient;
-  const executedMigrations = yield* sql.withTransaction(
-    Effect.gen(function* () {
-      // The 0.0.39 fork used upstream's next ID. Repair that exact lineage before
-      // the numeric upstream runner can skip the PR schema now assigned to 50.
-      if (toMigrationInclusive === undefined || toMigrationInclusive >= 50) {
-        const tables =
-          yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
-        if (tables.length > 0) {
-          const recorded = yield* sql<{
-            readonly name: string;
-          }>`SELECT name FROM effect_sql_migrations WHERE migration_id = 50`;
-          const name = recorded[0]?.name;
-          if (
-            name !== undefined &&
-            name !== "ProjectionThreadsSpawn" &&
-            name !== "ProjectionThreadPullRequests"
-          ) {
-            return yield* new Migrator.MigrationError({
-              kind: "BadState",
-              message: `Unrecognized migration 50: ${name}`,
-            });
-          }
-          if (name === undefined) {
-            const later =
-              yield* sql`SELECT migration_id FROM effect_sql_migrations WHERE migration_id > 50 LIMIT 1`;
-            if (later.length > 0) {
-              return yield* new Migrator.MigrationError({
-                kind: "BadState",
-                message: "Migration history after 50 is missing migration 50",
-              });
-            }
-          }
-          if (name === "ProjectionThreadsSpawn") {
-            const columns = yield* sql<{
-              readonly name: string;
-            }>`PRAGMA table_info(projection_threads)`;
-            if (!columns.some((column) => column.name === "spawn_json")) {
-              return yield* new Migrator.MigrationError({
-                kind: "BadState",
-                message:
-                  "Legacy fork migration 50 is recorded but spawn ownership schema is missing",
-              });
-            }
-            yield* Migration0050;
-            yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadPullRequests' WHERE migration_id = 50 AND name = 'ProjectionThreadsSpawn'`;
-          } else if (name === "ProjectionThreadPullRequests") {
-            const columns = yield* sql<{
-              readonly name: string;
-            }>`PRAGMA table_info(projection_thread_pull_requests)`;
-            const required = [
-              "thread_id",
-              "host",
-              "repository",
-              "number",
-              "url",
-              "source",
-              "linked_at",
-              "snapshot_json",
-              "stack_json",
-            ];
-            if (required.some((column) => !columns.some((existing) => existing.name === column))) {
-              return yield* new Migrator.MigrationError({
-                kind: "BadState",
-                message: "Migration 50 is recorded but the pull-request schema is incomplete",
-              });
-            }
-          }
-        }
-      }
-      const upstream = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
-      if (toMigrationInclusive === undefined) {
-        // A separate ledger leaves every future official migration ID available.
-        yield* run({
-          table: "t3_fork_migrations",
-          loader: Migrator.fromRecord({
-            "1_ProjectionThreadsSpawn": ProjectionThreadsSpawn,
-            "2_HeartbeatJobs": HeartbeatJobs,
-          }),
-        });
-      }
-      return upstream;
-    }),
-  );
+  // fork: repair the 0.0.39 fork's id 50 before the numeric runner can skip upstream's 50.
+  if (toMigrationInclusive === undefined || toMigrationInclusive >= 50) {
+    yield* repairLegacyForkMigration50();
+  }
+  const includesV2 =
+    toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
+  const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
+  if (includesV2) {
+    yield* assertV2MigrationsCanRun(toMigrationInclusive);
+  }
+  const executedMigrations = [
+    ...previewMigrations,
+    ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
+  ];
+  // fork: a separate ledger after upstream; its runs are not part of the returned history.
+  if (toMigrationInclusive === undefined) {
+    yield* runForkMigrations();
+  }
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
+
+  // The migrator keys on migration_id: a database that recorded a different
+  // migration under a shared id (local or fork builds) keeps that id and
+  // silently skips this build's migration at it. Surface the divergence so the
+  // skipped schema change is diagnosable.
+  const sql = yield* SqlClient.SqlClient;
+  const recorded = yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+  }>`SELECT migration_id, name FROM effect_sql_migrations`;
+  const manifestNames = new Map<number, string>(migrationEntries.map(([id, name]) => [id, name]));
+  const divergent = recorded.flatMap((row) => {
+    const expected = manifestNames.get(row.migration_id);
+    if (expected === undefined) {
+      return [`${row.migration_id}:${row.name} (unknown to this build)`];
+    }
+    return expected === row.name
+      ? []
+      : [`${row.migration_id}:${row.name} (this build: ${expected})`];
+  });
+  if (divergent.length > 0) {
+    yield* Effect.logWarning(
+      "Database migration history diverges from this build; recorded migration ids are skipped, not reconciled by name.",
+    ).pipe(Effect.annotateLogs({ divergent }));
+  }
   return executedMigrations;
 });

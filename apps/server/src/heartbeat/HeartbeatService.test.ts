@@ -12,7 +12,7 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Ref from "effect/Ref";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
@@ -31,52 +31,62 @@ const makeCrypto = () => {
   });
   return {
     ...base,
-    randomUUIDv4: Effect.sync(() => {
-      counter += 1;
-      return `${counter.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
-    }),
+    randomUUIDv4: (() =>
+      Effect.sync(() => {
+        counter += 1;
+        return `${counter.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
+      })) as Crypto.Crypto["randomUUIDv4"],
   } satisfies Crypto.Crypto;
 };
 
 const seedThread = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
-    INSERT INTO projection_threads (
-      thread_id, project_id, title, model_selection_json, created_at, updated_at
+    INSERT INTO orchestration_v2_projection_threads (
+      thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+      created_at, updated_at, payload_json
     ) VALUES (
-      ${THREAD_ID}, 'heartbeat-project', 'Heartbeat',
-      '{"instanceId":"codex","model":"gpt-5"}',
-      '2026-09-17T10:00:00.000Z', '2026-09-17T10:00:00.000Z'
+      ${THREAD_ID}, 'heartbeat-project', 'Heartbeat', 'codex', 'full-access', 'default',
+      '2026-09-17T10:00:00.000Z', '2026-09-17T10:00:00.000Z', '{}'
     )
   `;
 });
 
-// Plain test fixture serialization; kept outside Effect code so the JSON
-// global stays out of effect generators.
-const serializePayload = (payload: Readonly<Record<string, unknown>>): string =>
-  JSON.stringify(payload);
-
-const appendThreadEvent = (
-  eventId: string,
-  eventType: string,
-  payload: Readonly<Record<string, unknown>> = {},
-) =>
+const appendThreadEvent = (eventId: string, eventType: string) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<{ readonly sequence: number }>`
       INSERT INTO orchestration_events (
         event_id, aggregate_kind, stream_id, stream_version, event_type,
-        occurred_at, command_id, actor_kind, payload_json, metadata_json
+        occurred_at, command_id, actor_kind, payload_json, metadata_json,
+        application_event_version
       ) VALUES (
         ${eventId}, 'thread', ${THREAD_ID},
         COALESCE((SELECT MAX(stream_version) + 1 FROM orchestration_events
           WHERE aggregate_kind = 'thread' AND stream_id = ${THREAD_ID}), 0),
         ${eventType}, '2026-09-17T10:00:00.000Z', ${`cmd-${eventId}`},
-        'server', ${serializePayload(payload)}, '{}'
+        'server', '{}', '{}', 2
       )
       RETURNING sequence
     `;
     return rows[0]!.sequence;
+  });
+
+/** An accepted thread command whose receipt records the event it produced. */
+const acceptThreadCommand = (eventId: string, commandType: string, eventType: string) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const sequence = yield* appendThreadEvent(eventId, eventType);
+    yield* sql`
+      INSERT INTO orchestration_command_receipts (
+        command_id, aggregate_kind, aggregate_id, command_type, accepted_at,
+        result_sequence, status, error
+      ) VALUES (
+        ${`cmd-${eventId}`}, 'thread', ${THREAD_ID}, ${commandType},
+        '2026-09-17T10:00:00.000Z', ${sequence}, 'accepted', NULL
+      )
+    `;
+    return sequence;
   });
 
 const withService = <A, E>(
@@ -153,21 +163,7 @@ it.effect("counts fifty pending one-shots toward the logical cap until delete or
 it.effect("sequence cutoffs preserve jobs created after delayed interrupt and stop events", () =>
   withService((service) =>
     Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const appendLifecycleEvent = (eventId: string, eventType: string) => sql`
-        INSERT INTO orchestration_events (
-          event_id, aggregate_kind, stream_id, stream_version, event_type,
-          occurred_at, command_id, actor_kind, payload_json, metadata_json
-        ) VALUES (
-          ${eventId}, 'thread', ${THREAD_ID},
-          COALESCE((SELECT MAX(stream_version) + 1 FROM orchestration_events
-            WHERE aggregate_kind = 'thread' AND stream_id = ${THREAD_ID}), 1),
-          ${eventType}, '2026-09-17T10:00:00.000Z', ${`cmd-${eventId}`},
-          'server', '{}', '{}'
-        )
-      `;
-
-      yield* appendLifecycleEvent("evt-old-interrupt", "thread.turn-interrupt-requested");
+      yield* appendThreadEvent("evt-old-interrupt", "run.updated");
       const relative = yield* service.wakeup(THREAD_ID, {
         type: "arm",
         delaySeconds: HeartbeatDelaySeconds.make(60),
@@ -178,7 +174,7 @@ it.effect("sequence cutoffs preserve jobs created after delayed interrupt and st
       yield* service.cancelRelative(THREAD_ID, "delayed interrupt", 1);
       assert.strictEqual((yield* service.list(THREAD_ID)).jobs[0]?.id, relative.job.id);
 
-      yield* appendLifecycleEvent("evt-old-stop", "thread.session-stop-requested");
+      yield* appendThreadEvent("evt-old-stop", "thread.updated");
       const cron = yield* service.create(THREAD_ID, recurringInput);
       yield* service.cancelThread(THREAD_ID, "delayed stop", 2);
       const listed = (yield* service.list(THREAD_ID)).jobs;
@@ -261,9 +257,10 @@ it.effect("keeps cron and relative display IDs unambiguous across deterministic 
   const base = makeCrypto();
   const collisionCrypto = {
     ...base,
-    randomUUIDv4: Effect.sync(
-      () => `${ids[Math.min(index++, ids.length - 1)]}-0000-4000-8000-000000000000`,
-    ),
+    randomUUIDv4: (() =>
+      Effect.sync(
+        () => `${ids[Math.min(index++, ids.length - 1)]}-0000-4000-8000-000000000000`,
+      )) as Crypto.Crypto["randomUUIDv4"],
   } satisfies Crypto.Crypto;
   return withService(
     (service) =>
@@ -287,7 +284,8 @@ it.effect("preserves the prior relative arm when replacement ID allocation fails
   const base = makeCrypto();
   const fixedCrypto = {
     ...base,
-    randomUUIDv4: Effect.succeed("deadbeef-0000-4000-8000-000000000000"),
+    randomUUIDv4: (() =>
+      Effect.succeed("deadbeef-0000-4000-8000-000000000000")) as Crypto.Crypto["randomUUIDv4"],
   } satisfies Crypto.Crypto;
   return withService(
     (service) =>
@@ -523,13 +521,10 @@ it.effect("prunes a pre-stop cron on restart while retaining and running a post-
         cron: HeartbeatCronExpression.make("1 11 * * *"),
       } as const;
       const stoppedJob = yield* service.create(THREAD_ID, oneShot);
-      const stopSequence = yield* appendThreadEvent(
+      const stopSequence = yield* acceptThreadCommand(
         "evt-crash-stop",
-        "thread.session-stop-requested",
-        {
-          threadId: THREAD_ID,
-          createdAt: "2026-09-17T10:00:00.000Z",
-        },
+        "thread.stop",
+        "thread.updated",
       );
       const survivor = yield* service.create(THREAD_ID, oneShot);
 
@@ -567,6 +562,42 @@ it.effect("prunes a pre-stop cron on restart while retaining and running a post-
   ),
 );
 
+it.effect("prunes a cron armed at the head an event-less stop recorded on restart", () =>
+  withService((service, repository) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const head = yield* appendThreadEvent("evt-turn-completed", "run.updated");
+      const job = yield* service.create(THREAD_ID, {
+        ...recurringInput,
+        recurring: false,
+        cron: HeartbeatCronExpression.make("1 11 * * *"),
+      });
+      assert.deepStrictEqual(
+        (yield* repository.listByThread(THREAD_ID)).map((stored) => stored.originSequence),
+        [head],
+      );
+      // A Stop on an idle thread writes no event; its receipt records the head.
+      yield* sql`
+        INSERT INTO orchestration_command_receipts (
+          command_id, aggregate_kind, aggregate_id, command_type, accepted_at,
+          result_sequence, status, error
+        ) VALUES (
+          'cmd-idle-stop', 'thread', ${THREAD_ID}, 'thread.stop',
+          '2026-09-17T10:00:00.000Z', ${head}, 'accepted', NULL
+        )
+      `;
+
+      const restored = yield* HeartbeatService.make.pipe(
+        Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
+        Effect.provideService(Crypto.Crypto, makeCrypto()),
+      );
+      assert.deepStrictEqual((yield* restored.list(THREAD_ID)).jobs, []);
+      yield* restored.activateOnAcceptedTurn(THREAD_ID);
+      assert.deepStrictEqual(yield* restored.reserveDue(Date.parse(job.nextFireAt)), []);
+    }),
+  ),
+);
+
 it.effect("does not revive an archived cron after restore and later unarchive", () =>
   withService((service, repository) =>
     Effect.gen(function* () {
@@ -575,11 +606,7 @@ it.effect("does not revive an archived cron after restore and later unarchive", 
         recurring: false,
         cron: HeartbeatCronExpression.make("1 11 * * *"),
       });
-      yield* appendThreadEvent("evt-crash-archive", "thread.archived", {
-        threadId: THREAD_ID,
-        archivedAt: "2026-09-17T10:00:00.000Z",
-        updatedAt: "2026-09-17T10:00:00.000Z",
-      });
+      yield* acceptThreadCommand("evt-crash-archive", "thread.archive", "thread.archived");
 
       const restoredArchived = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
@@ -587,10 +614,7 @@ it.effect("does not revive an archived cron after restore and later unarchive", 
       );
       assert.deepStrictEqual((yield* restoredArchived.list(THREAD_ID)).jobs, []);
 
-      yield* appendThreadEvent("evt-crash-unarchive", "thread.unarchived", {
-        threadId: THREAD_ID,
-        updatedAt: "2026-09-17T10:00:01.000Z",
-      });
+      yield* acceptThreadCommand("evt-crash-unarchive", "thread.unarchive", "thread.unarchived");
       const restoredUnarchived = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
         Effect.provideService(Crypto.Crypto, makeCrypto()),
@@ -604,10 +628,7 @@ it.effect("does not revive an archived cron after restore and later unarchive", 
         recurring: false,
         cron: HeartbeatCronExpression.make("2 11 * * *"),
       });
-      yield* appendThreadEvent("evt-crash-delete", "thread.deleted", {
-        threadId: THREAD_ID,
-        deletedAt: "2026-09-17T10:00:02.000Z",
-      });
+      yield* acceptThreadCommand("evt-crash-delete", "thread.delete", "thread.deleted");
       const restoredDeleted = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
         Effect.provideService(Crypto.Crypto, makeCrypto()),

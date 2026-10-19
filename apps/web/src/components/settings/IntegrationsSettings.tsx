@@ -1,3 +1,4 @@
+import { SignalSettings } from "./SignalSettings"; // fork
 import { DeviceHostUpdates } from "../device/DeviceHostUpdates";
 import { DeviceToolVersions } from "../device/DeviceToolVersions";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
@@ -12,6 +13,7 @@ import { DeviceHostsSettings } from "./DeviceHostsSettings";
  * @module IntegrationsSettings
  */
 import {
+  AuthSettingsWriteScope,
   BrowserImportFailureReason,
   BROWSER_PROFILE_MAX_COUNT,
   type BrowserLinkTarget,
@@ -27,9 +29,10 @@ import {
   DEFAULT_PREVIEW_APPEARANCE,
   DEFAULT_PREVIEW_ZOOM_FACTOR,
   DEFAULT_UNIFIED_SETTINGS,
+  MAX_CROSS_PROVIDER_AGENT_MAX_DEPTH,
+  MAX_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS,
   MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS,
   type CrossProviderAgentRoutes,
-  type ProviderInstanceId,
   FILL_PREVIEW_VIEWPORT,
   PREVIEW_VIEWPORT_MAX_AREA,
   PREVIEW_VIEWPORT_MAX_DIMENSION,
@@ -55,7 +58,11 @@ import { cn, randomUUID } from "~/lib/utils";
 import { useEnvironments, usePrimaryEnvironment } from "~/state/environments";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "~/state/server";
 import { deviceEnvironment, useDeviceState } from "~/state/device";
+import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { previewEnvironment } from "~/state/preview";
+import { useServerConfigs } from "~/state/entities";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import {
   AgentDeviceSetupStatus,
   DeviceHubSetupStatus,
@@ -109,6 +116,7 @@ import {
   persistClientSettingsUpdate,
   useClientSettings,
   useClientSettingsHydrated,
+  useUpdatePrimarySettings,
 } from "~/hooks/useSettings";
 
 import {
@@ -138,28 +146,39 @@ type BrowserProfileDataBridge = Pick<
   "clearCookies" | "clearCache"
 >;
 
+/** Environments that host server-runtime tabs keep their own copy of each profile. */
+export interface ServerProfileData {
+  readonly environmentIds: ReadonlyArray<EnvironmentId>;
+  readonly clear: (environmentId: EnvironmentId, profileId: string) => Promise<void>;
+}
+
 export async function clearBrowserProfileData(
   bridge: BrowserProfileDataBridge | null,
   environmentIds: ReadonlyArray<EnvironmentId>,
   profileId: string,
+  server?: ServerProfileData,
 ): Promise<void> {
-  if (bridge === null || environmentIds.length === 0) {
+  const desktopEnvironmentIds = bridge === null ? [] : environmentIds;
+  const serverEnvironmentIds = server?.environmentIds ?? [];
+  if (desktopEnvironmentIds.length === 0 && serverEnvironmentIds.length === 0) {
     throw new Error("Browser profile data is not available to clear.");
   }
-  await Promise.all(
-    environmentIds.flatMap((environmentId) => [
-      bridge.clearCookies(environmentId, profileId),
-      bridge.clearCache(environmentId, profileId),
+  await Promise.all([
+    ...desktopEnvironmentIds.flatMap((environmentId) => [
+      bridge!.clearCookies(environmentId, profileId),
+      bridge!.clearCache(environmentId, profileId),
     ]),
-  );
+    ...serverEnvironmentIds.map((environmentId) => server!.clear(environmentId, profileId)),
+  ]);
 }
 
 export function browserProfileRemovalAvailable(
   bridgeAvailable: boolean,
   environmentsReady: boolean,
   environmentCount: number,
+  serverBrowserCount = 0,
 ): boolean {
-  return bridgeAvailable && environmentsReady && environmentCount > 0;
+  return (bridgeAvailable || serverBrowserCount > 0) && environmentsReady && environmentCount > 0;
 }
 
 /**
@@ -244,7 +263,7 @@ const rotateViewport = (
 
 function BrowserViewportSetting({ disabled }: { readonly disabled: boolean }) {
   const viewport = useClientSettings((settings) => settings.browserDefaultViewport);
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
 
   const sized = viewport._tag === "fill" ? null : viewport;
   const presentedSize = {
@@ -398,7 +417,7 @@ function BrowserViewportSetting({ disabled }: { readonly disabled: boolean }) {
 
 function BrowserZoomSetting({ disabled }: { readonly disabled: boolean }) {
   const zoomFactor = useClientSettings((settings) => settings.browserDefaultZoomFactor);
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
 
   return (
     <SettingsRow
@@ -441,7 +460,7 @@ function BrowserZoomSetting({ disabled }: { readonly disabled: boolean }) {
 
 function BrowserAppearanceSetting({ disabled }: { readonly disabled: boolean }) {
   const appearance = useClientSettings((settings) => settings.browserDefaultAppearance);
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
 
   return (
     <SettingsRow
@@ -488,7 +507,7 @@ function BrowserAppearanceSetting({ disabled }: { readonly disabled: boolean }) 
 function BrowserRecordingInputSettings({ disabled }: { readonly disabled: boolean }) {
   const showKeys = useClientSettings((settings) => settings.browserRecordingShowKeyPresses);
   const showMouse = useClientSettings((settings) => settings.browserRecordingShowMousePresses);
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
   return (
     <>
       <SettingsRow
@@ -525,7 +544,7 @@ function BrowserRecordingInputSettings({ disabled }: { readonly disabled: boolea
 
 function BrowserRecordingFrameRateSetting({ disabled }: { readonly disabled: boolean }) {
   const frameRate = useClientSettings((settings) => settings.browserRecordingFrameRate);
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
 
   return (
     <SettingsRow
@@ -579,7 +598,7 @@ const LINK_TARGET_LABELS: Readonly<Record<BrowserLinkTarget, string>> = {
 
 function BrowserLinkTargetSetting({ disabled }: { readonly disabled: boolean }) {
   const linkTarget = useClientSettings((settings) => settings.browserLinkTarget);
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
 
   return (
     <SettingsRow
@@ -619,6 +638,35 @@ function BrowserLinkTargetSetting({ disabled }: { readonly disabled: boolean }) 
   );
 }
 
+function PullRequestLinksOpenInAppSetting() {
+  const openInApp = useClientSettings((settings) => settings.pullRequestLinksOpenInApp);
+  const updateSettings = useUpdatePrimarySettings();
+
+  return (
+    <SettingsRow
+      {...searchableSetting("pull-request-links-open-in-app")}
+      description="Clicking a pull request link opens it in T3 Code. Turn off to open pull request links like any other link, on GitHub or your git host."
+      resetAction={
+        openInApp ? null : (
+          <SettingResetButton
+            label="open pull requests in T3 Code"
+            onClick={() => updateSettings({ pullRequestLinksOpenInApp: true })}
+          />
+        )
+      }
+      control={
+        <Switch
+          checked={openInApp}
+          onCheckedChange={(checked) =>
+            updateSettings({ pullRequestLinksOpenInApp: Boolean(checked) })
+          }
+          aria-label="Open pull requests in T3 Code"
+        />
+      }
+    />
+  );
+}
+
 function DeviceIntegrationSettings() {
   const { search, environment: selected } = useSettingsScope();
   const settings = useScopedSettings();
@@ -646,6 +694,7 @@ function DeviceIntegrationControls({
   enabled: boolean;
   agentAccessEnabled: boolean;
 }) {
+  const canConfigure = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const { state, loaded } = useDeviceState(environmentId);
   const { scope, environments, connectedEnvironments } = useSettingsScope();
   const updateSettings = useUpdateScopedSettings();
@@ -659,10 +708,18 @@ function DeviceIntegrationControls({
     "hub" | "check" | "agent" | "update-hub" | "update-agent" | null
   >(null);
   const busy = state.hostStatus === "installing" || state.hostStatus === "starting";
+  const localPlatformsUnavailable = state.hosts.some(
+    (host) => host.kind === "local" && !host.platforms.some((platform) => platform.available),
+  );
   const [platformsRevealed, setPlatformsRevealed] = useState(false);
   // Keep diagnostics visible through subsequent agent setup and refresh phases.
   if (platformsRevealed && !enabled) setPlatformsRevealed(false);
-  if (enabled && !platformsRevealed && state.hostStatus === "ready" && pending !== "hub") {
+  if (
+    enabled &&
+    !platformsRevealed &&
+    (state.hostStatus === "ready" || localPlatformsUnavailable) &&
+    pending !== "hub"
+  ) {
     setPlatformsRevealed(true);
   }
 
@@ -670,13 +727,16 @@ function DeviceIntegrationControls({
     kind: NonNullable<typeof pending>,
     input: { enabled?: boolean; agentAccessEnabled?: boolean },
   ) => {
-    if (!environmentId) return;
+    if (!environmentId || !readEnvironmentScope(environmentId, AuthSettingsWriteScope)) return;
     setPending(kind);
     try {
       const results = await Promise.allSettled(
         environments.map(async (environment) => {
           if (environment.connection.phase !== "connected" || !environment.serverConfig) {
             throw new Error("Environment disconnected");
+          }
+          if (!readEnvironmentScope(environment.environmentId, AuthSettingsWriteScope)) {
+            throw new Error("This connection cannot change device settings.");
           }
           return configure({
             environmentId: environment.environmentId,
@@ -777,7 +837,14 @@ function DeviceIntegrationControls({
             <ScopedSwitch
               settingKeys={["enableDeviceSupport"]}
               checked={enabled}
-              disabled={projectScope || !loaded || !environmentId || busy || pending !== null}
+              disabled={
+                !canConfigure ||
+                projectScope ||
+                !loaded ||
+                !environmentId ||
+                busy ||
+                pending !== null
+              }
               aria-label="Device hub"
               onCheckedChange={(checked) =>
                 void update("hub", {
@@ -842,6 +909,7 @@ function DeviceIntegrationControls({
               settingKeys={["enableAgentDeviceAccess"]}
               checked={agentAccessEnabled}
               disabled={
+                !canConfigure ||
                 connectedEnvironments.length === 0 ||
                 (!projectScope && (!loaded || !anyHubEnabled || busy)) ||
                 pending !== null
@@ -869,7 +937,7 @@ function DeviceIntegrationControls({
 
 function BrowserAutoShowFloatingPreviewSetting({ disabled }: { readonly disabled: boolean }) {
   const autoShow = useClientSettings((settings) => settings.browserAutoShowFloatingPreview);
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
 
   return (
     <SettingsRow
@@ -921,7 +989,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
   const userProfiles = useClientSettings((settings) => settings.browserProfiles);
   const defaultProfileId = useClientSettings((settings) => settings.browserDefaultProfileId);
   const settingsHydrated = useClientSettingsHydrated();
-  const updateSettings = useUpdateScopedSettings();
+  const updateSettings = useUpdatePrimarySettings();
   const { environments, isReady: environmentsReady } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const [sources, setSources] = useState<ReadonlyArray<BrowserImportSource> | null>(null);
@@ -931,12 +999,30 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
     readonly environmentName: string;
   } | null>(null);
   const [profilePendingRemoval, setProfilePendingRemoval] = useState<BrowserProfile | null>(null);
+  const [profilePendingClear, setProfilePendingClear] = useState<BrowserProfile | null>(null);
   const [profileRemovalError, setProfileRemovalError] = useState<string | null>(null);
   const [profileRemovalInFlight, setProfileRemovalInFlight] = useState(false);
+  const serverConfigs = useServerConfigs();
+  const runClearServerProfile = useAtomCommand(previewEnvironment.clearProfile, {
+    reportFailure: false,
+  });
+  const serverProfileData: ServerProfileData = {
+    environmentIds: environments
+      .map((environment) => environment.environmentId)
+      .filter(
+        (environmentId) =>
+          serverConfigs.get(environmentId)?.environment.capabilities.serverBrowser === true,
+      ),
+    clear: async (environmentId, profileId) => {
+      const result = await runClearServerProfile({ environmentId, input: { profileId } });
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    },
+  };
   const removalAvailable = browserProfileRemovalAvailable(
     previewBridge !== null,
     environmentsReady,
     environments.length,
+    serverProfileData.environmentIds.length,
   );
   const importInFlightRef = useRef(false);
   const [importInFlight, setImportInFlight] = useState(false);
@@ -980,7 +1066,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
 
   const clearProfileData = (id: string, name: string) => {
     if (!settingsHydrated || importInFlightRef.current) return;
-    if (!previewBridge || !environmentsReady || environments.length === 0) {
+    if (!removalAvailable) {
       toastManager.add({
         type: "error",
         title: `Could not clear ${name}'s data`,
@@ -992,6 +1078,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
       previewBridge,
       environments.map((environment) => environment.environmentId),
       id,
+      serverProfileData,
     )
       .then(() => {
         toastManager.add({ type: "success", title: `Cleared ${name}'s cookies and cache` });
@@ -1016,6 +1103,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
         previewBridge,
         environmentsReady ? environments.map((environment) => environment.environmentId) : [],
         id,
+        serverProfileData,
       );
     } catch {
       setProfileRemovalError("Profile data could not be deleted. Try again.");
@@ -1324,7 +1412,12 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
                   </MenuItem>
                   <MenuItem
                     disabled={!settingsHydrated || !removalAvailable}
-                    onClick={() => clearProfileData(profile.id, profile.name)}
+                    onClick={() => {
+                      // Clearing a server copy closes its open tabs, so it asks first.
+                      if (serverProfileData.environmentIds.length > 0) {
+                        setProfilePendingClear(profile);
+                      } else clearProfileData(profile.id, profile.name);
+                    }}
                   >
                     Clear cookies and cache
                   </MenuItem>
@@ -1368,8 +1461,8 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove “{profilePendingRemoval?.name}”?</AlertDialogTitle>
             <AlertDialogDescription>
-              Its cookies and logins are deleted. Tabs already open in this profile stay open until
-              you close them.
+              Its cookies and logins are deleted. Desktop tabs already open in this profile stay
+              open until you close them; server browser tabs close now.
             </AlertDialogDescription>
             {profileRemovalError ? (
               <p aria-live="polite" className="text-sm text-destructive">
@@ -1399,6 +1492,36 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
               }}
             >
               {profileRemovalInFlight ? "Removing…" : "Remove profile"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+      <AlertDialog
+        open={profilePendingClear !== null}
+        onOpenChange={(open) => {
+          if (!open) setProfilePendingClear(null);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Clear “{profilePendingClear?.name}”’s cookies and cache?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              You are signed out of its sites. Server browser tabs open in this profile close now.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (profilePendingClear)
+                  clearProfileData(profilePendingClear.id, profilePendingClear.name);
+                setProfilePendingClear(null);
+              }}
+            >
+              Clear data
             </Button>
           </AlertDialogFooter>
         </AlertDialogPopup>
@@ -1438,6 +1561,7 @@ function BrowserProfilesSetting({ disabled }: { readonly disabled: boolean }) {
   );
 }
 
+// fork: Integrations -> Agents section for the cross-provider agent tools.
 /**
  * Cross-provider agent tools. Every row is server-scoped: tool injection and
  * route validation happen on the server at session start, so the answer
@@ -1480,9 +1604,7 @@ function CrossProviderAgentAccessSetting() {
   );
 }
 
-const CROSS_PROVIDER_AGENT_MAX_DEPTH_LIMIT = 5;
 const CROSS_PROVIDER_AGENT_OUTPUT_CAP_STEP = 500;
-const CROSS_PROVIDER_AGENT_OUTPUT_CAP_LIMIT = 200_000;
 
 function CrossProviderAgentMaxDepthSetting() {
   const maxDepth = useScopedSettings((settings) => settings.crossProviderAgentMaxDepth);
@@ -1509,7 +1631,7 @@ function CrossProviderAgentMaxDepthSetting() {
         <NumberField
           value={maxDepth}
           min={1}
-          max={CROSS_PROVIDER_AGENT_MAX_DEPTH_LIMIT}
+          max={MAX_CROSS_PROVIDER_AGENT_MAX_DEPTH}
           format={NO_GROUPING}
           size="sm"
           className="w-20"
@@ -1517,7 +1639,7 @@ function CrossProviderAgentMaxDepthSetting() {
             if (value === null || !Number.isFinite(value)) return;
             updateSettings({
               crossProviderAgentMaxDepth: Math.min(
-                CROSS_PROVIDER_AGENT_MAX_DEPTH_LIMIT,
+                MAX_CROSS_PROVIDER_AGENT_MAX_DEPTH,
                 Math.max(1, Math.round(value)),
               ),
             });
@@ -1558,7 +1680,7 @@ function CrossProviderAgentOutputCapSetting() {
         <NumberField
           value={cap}
           min={MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS}
-          max={CROSS_PROVIDER_AGENT_OUTPUT_CAP_LIMIT}
+          max={MAX_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS}
           step={CROSS_PROVIDER_AGENT_OUTPUT_CAP_STEP}
           format={NO_GROUPING}
           size="sm"
@@ -1567,7 +1689,7 @@ function CrossProviderAgentOutputCapSetting() {
             if (value === null || !Number.isFinite(value)) return;
             updateSettings({
               crossProviderAgentOutputCapChars: Math.min(
-                CROSS_PROVIDER_AGENT_OUTPUT_CAP_LIMIT,
+                MAX_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS,
                 Math.max(MIN_CROSS_PROVIDER_AGENT_OUTPUT_CAP_CHARS, Math.round(value)),
               ),
             });
@@ -1726,7 +1848,7 @@ function CrossProviderAgentRoutesSetting() {
                                       current,
                                       currentDefaults,
                                       providers,
-                                      route.providerInstanceId as ProviderInstanceId,
+                                      route.providerInstanceId,
                                       model.slug,
                                       Boolean(next),
                                     ),
@@ -1795,12 +1917,8 @@ export function IntegrationsSettingsPanel() {
 
   return (
     <SettingsPageContainer>
-      <SettingsSection id="agents" title="Agents">
-        <CrossProviderAgentAccessSetting />
-        <CrossProviderAgentMaxDepthSetting />
-        <CrossProviderAgentOutputCapSetting />
-        <CrossProviderAgentRoutesSetting />
-      </SettingsSection>
+      {/* fork: Signal command routes */}
+      <SignalSettings />
       {/* Server-authoritative agent access is scoped by the header selection;
           the preview defaults below are device-local and ignore it. */}
       <ProjectDefaultsSettings category="integrations" />
@@ -1812,8 +1930,16 @@ export function IntegrationsSettingsPanel() {
         ) : (
           previewDefaults
         )}
+        <PullRequestLinksOpenInAppSetting />
       </SettingsSection>
       <DeviceIntegrationSettings />
+      {/* fork: cross-provider agent settings, environment-wide. */}
+      <SettingsSection id="agents" title="Agents">
+        <CrossProviderAgentAccessSetting />
+        <CrossProviderAgentMaxDepthSetting />
+        <CrossProviderAgentOutputCapSetting />
+        <CrossProviderAgentRoutesSetting />
+      </SettingsSection>
     </SettingsPageContainer>
   );
 }

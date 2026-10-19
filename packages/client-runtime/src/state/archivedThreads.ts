@@ -1,15 +1,13 @@
-import { EnvironmentId, type OrchestrationShellSnapshot } from "@t3tools/contracts";
+import { EnvironmentId, type OrchestrationV2ArchivedShellSnapshot } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import { pipe } from "effect/Function";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
-
-import { isSpawnedChildThread } from "./models.ts";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 export interface ArchivedSnapshotEntry {
   readonly environmentId: EnvironmentId;
-  readonly snapshot: OrchestrationShellSnapshot;
+  readonly snapshot: OrchestrationV2ArchivedShellSnapshot;
 }
 
 export interface ArchivedThreadSnapshotsState {
@@ -39,19 +37,10 @@ export function parseArchivedThreadsEnvironmentKey(key: string): ReadonlyArray<E
   );
 }
 
-/** Archived snapshots are only ever read as lists, so spawned children leave here. */
-function withoutSpawnedChildThreads(
-  snapshot: OrchestrationShellSnapshot,
-): OrchestrationShellSnapshot {
-  return snapshot.threads.some(isSpawnedChildThread)
-    ? { ...snapshot, threads: snapshot.threads.filter((thread) => !isSpawnedChildThread(thread)) }
-    : snapshot;
-}
-
 export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
   readonly getSnapshotAtom: (
     environmentId: EnvironmentId,
-  ) => Atom.Atom<AsyncResult.AsyncResult<OrchestrationShellSnapshot, E>>;
+  ) => Atom.Atom<AsyncResult.AsyncResult<OrchestrationV2ArchivedShellSnapshot, E>>;
   readonly labelPrefix: string;
 }) {
   return Atom.family((environmentKey: string) =>
@@ -66,7 +55,7 @@ export function createArchivedThreadSnapshotsAtomFamily<E>(options: {
 
         const snapshot = Option.getOrNull(AsyncResult.value(result));
         if (snapshot !== null) {
-          snapshots.push({ environmentId, snapshot: withoutSpawnedChildThreads(snapshot) });
+          snapshots.push({ environmentId, snapshot });
         }
 
         if (error === null && result._tag === "Failure") {

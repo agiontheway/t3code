@@ -10,28 +10,26 @@ import {
   HeartbeatTimeZone,
   HeartbeatWakeupResult,
   McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as McpSchema from "effect/unstable/ai/McpSchema";
-import * as Tool from "effect/unstable/ai/Tool";
-import * as Toolkit from "effect/unstable/ai/Toolkit";
+import { Tool, Toolkit } from "effect/ai";
 
 import { HeartbeatService } from "../../../heartbeat/HeartbeatService.ts";
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as DelegationGrants from "../../../orchestration-v2/fork/DelegationGrants.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
   HeartbeatService,
-  ProjectionSnapshotQuery.ProjectionSnapshotQuery,
   ServerSettings.ServerSettingsService,
+  DelegationGrants.DelegationGrants,
 ];
-
-const heartbeatToolVisible = () =>
-  McpInvocationContext.currentMcpInvocationHasCapability("heartbeat");
 
 export const HeartbeatCreateToolInput = Schema.Struct({
   cron: HeartbeatCronExpression.annotate({
@@ -74,8 +72,10 @@ export const HeartbeatWakeupToolInput = Schema.Struct({
 );
 export type HeartbeatWakeupToolInput = typeof HeartbeatWakeupToolInput.Type;
 
+/** What a heartbeat tool fails with, including the access gate's refusals. */
 export const HeartbeatToolError = Schema.Union([
   McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
   ...HeartbeatServiceError.members,
 ]);
 export type HeartbeatToolError = typeof HeartbeatToolError.Type;
@@ -88,7 +88,6 @@ const HeartbeatCreateTool = Tool.make("t3_heartbeat_create", {
   failure: HeartbeatToolError,
   dependencies,
 })
-  .annotate(McpSchema.EnabledWhen, heartbeatToolVisible)
   .annotate(Tool.Title, "Create thread heartbeat")
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
@@ -98,11 +97,11 @@ const HeartbeatCreateTool = Tool.make("t3_heartbeat_create", {
 const HeartbeatListTool = Tool.make("t3_heartbeat_list", {
   description:
     "List this thread's cron heartbeats and pending process-local relative wakeup, including full prompts and status. An empty list is successful.",
+  // No `parameters`: Tool.EmptyParams exports a top-level object schema.
   success: HeartbeatListResult,
   failure: HeartbeatToolError,
   dependencies,
 })
-  .annotate(McpSchema.EnabledWhen, heartbeatToolVisible)
   .annotate(Tool.Title, "List thread heartbeats")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
@@ -117,7 +116,6 @@ const HeartbeatDeleteTool = Tool.make("t3_heartbeat_delete", {
   failure: HeartbeatToolError,
   dependencies,
 })
-  .annotate(McpSchema.EnabledWhen, heartbeatToolVisible)
   .annotate(Tool.Title, "Delete thread heartbeat")
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, true)
@@ -132,7 +130,6 @@ const HeartbeatWakeupTool = Tool.make("t3_heartbeat_wakeup", {
   failure: HeartbeatToolError,
   dependencies,
 })
-  .annotate(McpSchema.EnabledWhen, heartbeatToolVisible)
   .annotate(Tool.Title, "Arm or stop relative thread wakeup")
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)

@@ -9,17 +9,21 @@ Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCod
 This fork adds native cross-provider dispatch: a Claude or Codex thread can delegate work to
 another configured Claude or Codex instance, using that instance's own subscription or API-key
 configuration. OpenRouter-backed instances can participate through those same supported harnesses.
-Children use T3 Code's existing thread lifecycle and appear under **Agents → Direct Spawns**, with
-live status, token counts, tool counts, and reasoning effort.
+Children use T3 Code's existing thread lifecycle and appear under **Thread details → Lineage**,
+with live status, model, and reasoning effort; their results arrive in the parent's conversation.
 
-Dispatch runs inside T3 Code through the existing Claude Agent SDK and Codex app-server
-integrations. It requires no CLI proxy or separate dispatch service. The fork also retains the
-upstream snapshot's remote environments and machine load balancing.
+Dispatch runs inside T3 Code through its built-in MCP server, which both Claude and Codex sessions
+use. It requires no CLI proxy or separate dispatch service, and it sits alongside T3 Code's native
+`delegate_task`. The fork also adds [scheduled wake-ups](./docs/user/heartbeat.md), with which an
+agent can schedule its own later turns, and [Signal commands](./docs/user/signal.md), and retains
+the upstream snapshot's remote environments and machine load balancing.
 
 Start with [cross-provider agents](./docs/user/cross-provider-agents.md) for setup, OpenRouter,
-and a dispatch diagram. To build this fork with official T3 Connect enabled, follow
-[the source-build steps](#build-this-fork-with-t3-connect) below. The upstream downloads and
-`npx t3@latest` instructions on this page install upstream T3 Code, not this fork.
+and a dispatch diagram. Upgrading an installed 0.0.45 copy of the fork? Follow the
+[fork upgrade runbook](./docs/operations/fork-upgrade-runbook.md). To build this fork with
+official T3 Connect enabled, follow [the source-build steps](#build-this-fork-with-t3-connect)
+below. The upstream downloads and install commands on this page install upstream T3 Code, not
+this fork.
 
 ### Build this fork with T3 Connect
 
@@ -89,6 +93,12 @@ Install the latest version of the desktop app from [GitHub Releases](https://git
 winget install T3Tools.T3Code
 ```
 
+#### Windows (`scoop`)
+
+```bash
+scoop install extras/t3code
+```
+
 #### macOS (Homebrew)
 
 ```bash
@@ -133,7 +143,9 @@ Full docs live in [docs/](./docs). There's no docs site yet.
 - [Permission modes](./docs/user/permission-modes.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)
 - [Project settings](./docs/user/project-settings.md)
+- [Appearance preferences](./docs/user/appearance.md)
 - [Remote access from a phone or another machine](./docs/user/remote-access.md)
+- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
 - [Keeping app and server in sync](./docs/user/updating.md)
 - [Source control integrations](./docs/user/source-control.md)
 - Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)

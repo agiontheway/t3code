@@ -17,11 +17,12 @@ Things to know:
 - The T3 host must be running. Closing a browser or app window does not stop schedules; stopping
   the host does. A powered-off machine cannot fire a wake-up. After the host sleeps and wakes,
   missed schedules are delivered once, coalesced, without replaying everything in between.
-- Schedules survive a server restart and stay dormant until you send a new message in that thread,
-  including future one-shots. Wake-ups set for a number of minutes ("wake me in 10 minutes") are
-  lost on restart.
-- Interrupting a turn cancels that turn's pending minute wake-up. Stopping, archiving or deleting
-  the thread removes all of its schedules.
+- Schedules survive a server restart and stay dormant until a person sends a new message in that
+  thread, including future one-shots. Wake-ups set for a number of minutes ("wake me in 10
+  minutes") are lost on restart.
+- The **Stop** button interrupts the current turn and cancels that turn's pending minute
+  wake-ups; other schedules stay. Archiving or deleting the thread, or a parent agent cancelling
+  it as a delegated task, removes all of its schedules.
 - Recurring schedules expire seven days after they are created; the agent is told the expiry time
   when creating one.
 

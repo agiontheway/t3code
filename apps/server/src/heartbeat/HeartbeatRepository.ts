@@ -9,7 +9,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { toPersistenceSqlError } from "../persistence/Errors.ts";
 
@@ -132,36 +132,53 @@ export const make = Effect.gen(function* () {
 
   const threadExists: HeartbeatRepository["Service"]["threadExists"] = (threadId) =>
     sql`
-      SELECT thread_id FROM projection_threads WHERE thread_id = ${threadId} LIMIT 1
+      SELECT thread_id FROM orchestration_v2_projection_threads
+      WHERE thread_id = ${threadId} AND deleted_at IS NULL
+      LIMIT 1
     `.pipe(
       Effect.map((rows) => rows.length > 0),
       Effect.mapError(mapError("threadExists")),
     );
 
+  // The thread's v2 event head, in the sequence space command receipts record.
   const latestThreadSequence: HeartbeatRepository["Service"]["latestThreadSequence"] = (threadId) =>
     sql<{ readonly sequence: number | null }>`
-      SELECT MAX(sequence) AS sequence FROM orchestration_events
-      WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
+      SELECT MAX(sequence) AS sequence
+      FROM orchestration_events INDEXED BY idx_orchestration_events_agent_stream_sequence
+      WHERE application_event_version = 2
+        AND aggregate_kind = 'thread'
+        AND stream_id = ${threadId}
     `.pipe(
       Effect.map((rows) => rows[0]?.sequence ?? 0),
       Effect.mapError(mapError("latestThreadSequence")),
     );
 
+  // Explicit stop, archive and delete remove every job whose origin is below
+  // the returned sequence. Settle-driven session detach is a different command
+  // and never cancels. A command that wrote events records its last event, so
+  // a job armed at that sequence came after it. A Stop that ended nothing
+  // writes no event and records the thread head it saw, so a job armed at that
+  // head cannot be proven later and is cancelled too (one past the head).
   const latestCancellationSequence: HeartbeatRepository["Service"]["latestCancellationSequence"] = (
     threadId,
   ) =>
     sql<{ readonly sequence: number | null }>`
-        SELECT MAX(sequence) AS sequence FROM orchestration_events
-        WHERE aggregate_kind = 'thread'
-          AND stream_id = ${threadId}
-          AND (
-            event_type IN ('thread.archived', 'thread.deleted')
-            OR (
-              event_type = 'thread.session-stop-requested'
-              AND COALESCE(json_extract(payload_json, '$.onlyIfSettled'), 0) <> 1
-            )
-          )
-      `.pipe(
+      SELECT MAX(
+        receipts.result_sequence + CASE
+          WHEN EXISTS (
+            SELECT 1 FROM orchestration_events events
+            WHERE events.command_id = receipts.command_id
+              AND events.application_event_version = 2
+          ) THEN 0
+          ELSE 1
+        END
+      ) AS sequence
+      FROM orchestration_command_receipts receipts
+      WHERE receipts.aggregate_kind = 'thread'
+        AND receipts.aggregate_id = ${threadId}
+        AND receipts.status = 'accepted'
+        AND receipts.command_type IN ('thread.stop', 'thread.archive', 'thread.delete')
+    `.pipe(
       Effect.map((rows) => rows[0]?.sequence ?? undefined),
       Effect.mapError(mapError("latestCancellationSequence")),
     );

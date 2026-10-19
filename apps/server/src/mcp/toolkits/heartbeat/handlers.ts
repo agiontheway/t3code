@@ -1,62 +1,73 @@
 import { McpCapabilityUnavailableError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 
 import { heartbeatAccessAllowed } from "../../../heartbeat/HeartbeatAccess.ts";
 import { HeartbeatService } from "../../../heartbeat/HeartbeatService.ts";
-import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { DelegationGrants } from "../../../orchestration-v2/fork/DelegationGrants.ts";
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import { HeartbeatToolkit } from "./tools.ts";
 
 const make = Effect.gen(function* () {
   const heartbeat = yield* HeartbeatService;
-  const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const threads = yield* ThreadManagementService.ThreadManagementService;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const grants = yield* DelegationGrants;
 
+  // The credential bit is minted at session start; settings and the child's
+  // grant are rechecked on every call, as the credential may predate a change.
   const requireHeartbeatAccess = Effect.fn("HeartbeatToolkit.requireAccess")(function* () {
-    const scope = yield* McpInvocationContext.requireMcpCapability("heartbeat");
+    const scope = yield* McpInvocationContext.requireThreadMcpCapability("heartbeat");
     const allowed = yield* Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings;
-      const thread = yield* snapshots.getThreadShellById(scope.threadId);
-      return Option.isSome(thread) && heartbeatAccessAllowed(settings, thread.value);
-    }).pipe(Effect.orElseSucceed(() => false));
-    if (allowed) return scope;
+      const thread = yield* threads.getThreadShell(scope.thread.threadId);
+      if (thread === null || thread.deletedAt !== null) return false;
+      return yield* heartbeatAccessAllowed(settings, thread);
+    }).pipe(
+      Effect.provideService(DelegationGrants, grants),
+      Effect.orElseSucceed(() => false),
+    );
+    if (allowed) return scope.thread.threadId;
     return yield* new McpCapabilityUnavailableError({
       capability: "heartbeat",
       environmentId: scope.environmentId,
-      threadId: scope.threadId,
-      providerSessionId: scope.providerSessionId,
-      providerInstanceId: scope.providerInstanceId,
+      threadId: scope.thread.threadId,
+      providerSessionId: scope.thread.providerSessionId,
+      providerInstanceId: scope.thread.providerInstanceId,
     });
   });
 
-  return HeartbeatToolkit.of({
-    t3_heartbeat_create: (input) =>
+  return {
+    t3_heartbeat_create: McpToolAccess.actsAsCaller((input) =>
       Effect.gen(function* () {
-        const scope = yield* requireHeartbeatAccess();
-        return yield* heartbeat.create(scope.threadId, {
+        const threadId = yield* requireHeartbeatAccess();
+        return yield* heartbeat.create(threadId, {
           cron: input.cron,
           prompt: input.prompt,
           recurring: input.recurring,
           ...(input.timezone === undefined ? {} : { timezone: input.timezone }),
         });
       }),
-    t3_heartbeat_list: () =>
+    ),
+    t3_heartbeat_list: McpToolAccess.readsAsCaller(() =>
       Effect.gen(function* () {
-        const scope = yield* requireHeartbeatAccess();
-        return yield* heartbeat.list(scope.threadId);
+        const threadId = yield* requireHeartbeatAccess();
+        return yield* heartbeat.list(threadId);
       }),
-    t3_heartbeat_delete: (input) =>
+    ),
+    t3_heartbeat_delete: McpToolAccess.actsAsCaller((input) =>
       Effect.gen(function* () {
-        const scope = yield* requireHeartbeatAccess();
-        return yield* heartbeat.delete(scope.threadId, input);
+        const threadId = yield* requireHeartbeatAccess();
+        return yield* heartbeat.delete(threadId, input);
       }),
-    t3_heartbeat_wakeup: (input) =>
+    ),
+    t3_heartbeat_wakeup: McpToolAccess.actsAsCaller((input) =>
       Effect.gen(function* () {
-        const scope = yield* requireHeartbeatAccess();
+        const threadId = yield* requireHeartbeatAccess();
         return yield* heartbeat.wakeup(
-          scope.threadId,
+          threadId,
           input.stop === true
             ? { type: "stop" }
             : {
@@ -68,7 +79,8 @@ const make = Effect.gen(function* () {
               },
         );
       }),
-  });
+    ),
+  } satisfies McpToolAccess.Handlers<typeof HeartbeatToolkit.tools>;
 });
 
-export const HeartbeatToolkitHandlersLive = HeartbeatToolkit.toLayer(make);
+export const layer = McpToolAccess.toLayer(HeartbeatToolkit, make);

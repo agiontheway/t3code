@@ -3,7 +3,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { IsoDateTime, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
-import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "./orchestration.ts";
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "./chatAttachment.ts";
 
 export const HeartbeatJobId = Schema.String.check(Schema.isPattern(/^[0-9a-f]{8}$/)).pipe(
   Schema.brand("HeartbeatJobId"),

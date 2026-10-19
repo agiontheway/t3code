@@ -244,12 +244,12 @@ export const make = Effect.gen(function* () {
   });
 
   const nextPublicId = Effect.fn("HeartbeatService.nextPublicId")(function* () {
-    const uuid = yield* crypto.randomUUIDv4;
+    const uuid = yield* crypto.randomUUIDv4();
     return HeartbeatJobId.make(uuid.replaceAll("-", "").slice(0, 8));
   });
 
   const nextOccurrenceId = Effect.fn("HeartbeatService.nextOccurrenceId")(function* () {
-    return HeartbeatOccurrenceId.make(yield* crypto.randomUUIDv4);
+    return HeartbeatOccurrenceId.make(yield* crypto.randomUUIDv4());
   });
 
   const nextAvailableRelativeId = Effect.fn("HeartbeatService.nextAvailableRelativeId")(function* (
