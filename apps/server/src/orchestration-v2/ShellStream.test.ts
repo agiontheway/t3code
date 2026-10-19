@@ -604,6 +604,31 @@ describe("skipUnchangedThreadShells", () => {
       Effect.map((items) => Array.from(items, (item) => ("sequence" in item ? item.sequence : -1))),
     );
 
+  // fork: schema equivalence must retain usage-only refreshes.
+  it.effect("sends changes to each sidebar usage field", () =>
+    Effect.gen(function* () {
+      const usage = {
+        contextUsedTokens: 100,
+        contextMaxTokens: 1000,
+        totalTokens: 200,
+        toolUses: 1,
+      };
+      const sent = yield* run([
+        updated(1, shell("a")),
+        updated(2, shell("a", { usage })),
+        updated(3, shell("a", { usage, updatedAt: at(100) })),
+        updated(4, shell("a", { usage: { ...usage, contextUsedTokens: 101 } })),
+        updated(
+          5,
+          shell("a", { usage: { ...usage, contextUsedTokens: 101, contextMaxTokens: 2000 } }),
+        ),
+        updated(6, shell("a", { usage: { ...usage, totalTokens: 300 } })),
+        updated(7, shell("a", { usage: { ...usage, totalTokens: 300, toolUses: 2 } })),
+      ]);
+      expect(sent).toEqual([1, 2, 4, 5, 6, 7]);
+    }),
+  );
+
   it.effect("drops shells that only moved updatedAt, and resends them after a while", () =>
     Effect.gen(function* () {
       const sent = yield* run([

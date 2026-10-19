@@ -112,6 +112,8 @@ export interface EnvironmentThreadShell {
   /** What a live subagent below this thread waits on the user for. Subagent
       rows are hidden, so the threads above them carry it. */
   readonly pendingSubagentRequest?: PendingSubagentRequest | null;
+  // fork: lightweight sidebar usage from the server shell.
+  readonly usage?: OrchestrationV2ThreadShell["usage"];
   readonly hasActionableProposedPlan: boolean;
   readonly pendingBackgroundTasks: ReadonlyArray<
     NonNullable<OrchestrationV2ThreadShell["pendingBackgroundTasks"]>[number]
@@ -266,6 +268,8 @@ export function presentThreadShell(
       thread.pendingRuntimeRequest.kind !== "auth_refresh",
     hasPendingUserInput: thread.pendingRuntimeRequest?.kind === "user_input",
     pendingSubagentRequest,
+    // fork: preserve unknown usage on older servers.
+    ...(thread.usage === undefined ? {} : { usage: thread.usage }),
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],
     providerInstanceHistory: thread.providerInstanceHistory ?? [],

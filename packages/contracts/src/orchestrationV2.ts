@@ -1991,6 +1991,15 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
    * user role, so they move latestUserMessageAt but not this.
    */
   latestUserAuthoredMessageAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  // fork: sidebar telemetry stays optional for older shells.
+  usage: Schema.optional(
+    Schema.Struct({
+      contextUsedTokens: Schema.optional(NonNegativeInt),
+      contextMaxTokens: Schema.optional(PositiveInt),
+      totalTokens: Schema.optional(NonNegativeInt),
+      toolUses: NonNegativeInt,
+    }),
+  ),
   hasActionableProposedPlan: Schema.Boolean,
   // Normalized post-settlement background work for sidebar Waiting pills.
   // Empty when the latest root run is still active or no pending work remains.

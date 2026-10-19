@@ -9,6 +9,8 @@ so far (`— tok` until its provider reports usage). Delegating inside one provi
 Code's native `delegate_task` tool, which stays available alongside; this feature only covers
 crossing providers.
 
+Hover a thread in the sidebar to check its current context usage and limit, lifetime tokens across handoffs, and tool calls, excluding child threads.
+
 Children do not appear in the thread list, search, the command palette, or the mobile home screen.
 Open one by clicking its row under **Lineage** on the parent; it is a normal thread from there, and
 its own **Lineage** lists the children it started, so you can drill down one level at a time. A

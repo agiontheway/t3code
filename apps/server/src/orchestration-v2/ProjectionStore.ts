@@ -1,3 +1,10 @@
+// fork: sidebar usage shares delegated-task token arithmetic.
+import {
+  decodeShellTurnUsage,
+  decodeShellContextUsage,
+  latestShellContextUsage,
+  threadShellUsage,
+} from "./fork/ThreadShellUsage.ts";
 import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -1049,6 +1056,10 @@ type ShellThreadRow = {
   readonly pending_secret_request_payload_json: string | null;
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
+  // fork: narrow telemetry aggregates for this thread only.
+  readonly usage_turns_json: string;
+  readonly usage_context_json: string;
+  readonly usage_tool_count: number;
   readonly has_actionable_proposed_plan: number;
   readonly item_count: number;
   readonly runless_item_count: number;
@@ -1520,6 +1531,21 @@ export function threadShellFromProjection(
     runs: projection.runs,
     pullRequests: projection.thread.pullRequests,
   });
+  // fork: keep in-memory shells equivalent to persisted shells.
+  const usage = threadShellUsage({
+    providerTurns: projection.providerTurns,
+    contextUsage:
+      latestShellContextUsage(
+        projection.providerTurns.flatMap((turn) => (turn.tokenUsage ? [turn.tokenUsage] : [])),
+      ) ??
+      projection.providerThreads.find(
+        (thread) => thread.id === projection.thread.activeProviderThreadId,
+      )?.contextUsage ??
+      null,
+    toolCallCount: projection.nodes.filter(
+      (node) => node.threadId === projection.thread.id && node.kind === "tool_call",
+    ).length,
+  });
   return {
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
@@ -1575,6 +1601,8 @@ export function threadShellFromProjection(
     latestUserMessageAt: latestUserMessage?.updatedAt ?? null,
     latestUserAuthoredMessageAt:
       userMessages.find((message) => message.createdBy === "user")?.updatedAt ?? null,
+    // fork: omit unreported telemetry.
+    ...(usage === undefined ? {} : { usage }),
     hasActionableProposedPlan: projection.plans.some(
       (plan) => plan.kind === "proposed_plan" && plan.status === "active",
     ),
@@ -1672,6 +1700,8 @@ type ShellThreadState = {
   readonly pendingRuntimeRequest: OrchestrationV2ThreadProjection["runtimeRequests"][number] | null;
   readonly latestUserMessageAt: DateTime.Utc | null;
   readonly latestUserAuthoredMessageAt: DateTime.Utc | null;
+  // fork: carry telemetry through the shared live/archive mapper.
+  readonly usage: OrchestrationV2ThreadShell["usage"];
   readonly hasActionableProposedPlan: boolean;
   readonly pendingBackgroundTasks: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
   readonly providerInstanceHistory: OrchestrationV2ThreadShell["providerInstanceHistory"];
@@ -1838,6 +1868,8 @@ function shellFromState(input: {
     latestVisibleMessage: null,
     latestUserMessageAt: input.state.latestUserMessageAt,
     latestUserAuthoredMessageAt: input.state.latestUserAuthoredMessageAt,
+    // fork: omit telemetry until some usage or tools exist.
+    ...(input.state.usage === undefined ? {} : { usage: input.state.usage }),
     hasActionableProposedPlan: input.state.hasActionableProposedPlan,
     pendingBackgroundTasks: input.state.pendingBackgroundTasks,
     providerInstanceHistory: input.state.providerInstanceHistory,
@@ -5442,6 +5474,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND plan.kind = 'proposed_plan'
                   AND plan.status = 'active'
               ) AS has_actionable_proposed_plan,
+              -- fork: aggregate narrow usage JSON; share token arithmetic with delegated tasks.
+              (
+                SELECT json_group_array(json_extract(pt.payload_json, '$.turnTokenUsage'))
+                FROM orchestration_v2_projection_provider_turns pt
+                WHERE pt.thread_id = t.thread_id
+                  AND json_extract(pt.payload_json, '$.turnTokenUsage.usageStatus') IN ('partial', 'complete')
+              ) AS usage_turns_json,
+              (
+                -- fork: insertion order matches memory upserts, including timestamp ties.
+                SELECT json_group_array(json_extract(pt.payload_json, '$.tokenUsage') ORDER BY pt.rowid)
+                FROM orchestration_v2_projection_provider_turns pt
+                WHERE pt.thread_id = t.thread_id
+                  AND json_extract(pt.payload_json, '$.tokenUsage') IS NOT NULL
+              ) AS usage_context_json,
+              (
+                SELECT COUNT(*) FROM orchestration_v2_projection_nodes node
+                WHERE node.thread_id = t.thread_id AND node.kind = 'tool_call'
+              ) AS usage_tool_count,
               -- Count per run on the covering (thread_id, run_id) index, then
               -- look up each run once, instead of one run lookup per item.
               (
@@ -5909,6 +5959,20 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             row.latest_user_authored_message_at === null
               ? null
               : DateTime.makeUnsafe(row.latest_user_authored_message_at),
+          // fork: active-provider context is the fallback when no turn reports context.
+          usage: threadShellUsage({
+            providerTurns: (yield* decodeShellTurnUsage(row.usage_turns_json)).map(
+              (turnTokenUsage) => ({ turnTokenUsage }),
+            ),
+            contextUsage:
+              latestShellContextUsage(yield* decodeShellContextUsage(row.usage_context_json)) ??
+              providerThreadsByThreadId
+                .get(thread.id)
+                ?.find((providerThread) => providerThread.id === thread.activeProviderThreadId)
+                ?.contextUsage ??
+              null,
+            toolCallCount: row.usage_tool_count,
+          }),
           hasActionableProposedPlan: row.has_actionable_proposed_plan === 1,
           pendingBackgroundTasks,
           providerInstanceHistory: providerInstanceHistoryForShell({

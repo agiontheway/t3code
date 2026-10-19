@@ -690,7 +690,234 @@ it.effect("memory shell snapshots scope to one project", () =>
   ),
 );
 
+// fork: exercise the same usage projection through SQL and memory, live and archived.
+const assertSidebarShellUsage = (archived: boolean) =>
+  Effect.gen(function* () {
+    const suffix = archived ? "archived" : "active";
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make(`thread:sidebar-usage:${suffix}`);
+    const childId = ThreadId.make(`thread:sidebar-usage-child:${suffix}`);
+    const providerThreadId = ProviderThreadId.make(`provider-thread:sidebar-usage:${suffix}`);
+    for (const id of [threadId, childId]) {
+      yield* store.apply({
+        id: EventId.make(`event:${id}:created`),
+        type: "thread.created",
+        threadId: id,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id,
+          projectId: ProjectId.make(`project:sidebar-usage:${suffix}`),
+          title: "Sidebar usage",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: providerThreadId,
+          lineage: {
+            parentThreadId: id === childId ? threadId : null,
+            relationshipToParent: id === childId ? "subagent" : null,
+            rootThreadId: threadId,
+          },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: archived ? now : null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+    }
+    const read = Effect.map(store.getShellSnapshot(), (snapshot) =>
+      [...snapshot.threads, ...snapshot.archivedThreads].find((thread) => thread.id === threadId)!,
+    );
+    assert.notProperty(yield* read, "usage");
+    for (const id of [threadId, childId]) {
+      for (let index = 0; index < (id === threadId ? 3 : 2); index++) {
+        const nodeId = NodeId.make(`node:${id}:${index}:${suffix}`);
+        yield* store.apply({
+          id: EventId.make(`event:${nodeId}`),
+          type: "node.updated",
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            id: nodeId,
+            threadId: id,
+            runId: null,
+            rootNodeId: nodeId,
+            parentNodeId: null,
+            kind: "tool_call",
+            status: "completed",
+            countsForRun: false,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: now,
+            completedAt: now,
+          },
+        });
+      }
+    }
+    assert.deepEqual((yield* read).usage, { toolUses: 3 });
+    yield* store.apply({
+      id: EventId.make(`event:sidebar-usage:provider:${suffix}`),
+      type: "provider-thread.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: providerThreadId,
+        driver,
+        providerInstanceId,
+        providerSessionId: null,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: null,
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        contextUsage: { usedTokens: 500, maxTokens: 1000 },
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    assert.deepEqual((yield* read).usage, {
+      contextUsedTokens: 500,
+      contextMaxTokens: 1000,
+      toolUses: 3,
+    });
+    const turns = [
+      {
+        usageStatus: "partial",
+        inputTokens: 100,
+        cachedInputTokens: 20,
+        cacheCreationTokens: 30,
+        outputTokens: 40,
+      },
+      {
+        usageStatus: "complete",
+        inputTokens: 200,
+        cachedInputTokens: 50,
+        cacheCreationTokens: 60,
+        outputTokens: 70,
+      },
+      { usageStatus: "unavailable", inputTokens: 999 },
+    ] as const;
+    for (const [index, usage] of turns.entries()) {
+      yield* store.apply({
+        id: EventId.make(`event:sidebar-usage:turn:${index}:${suffix}`),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: ProviderTurnId.make(`provider-turn:sidebar-usage:${index}:${suffix}`),
+          providerThreadId:
+            index === 0
+              ? ProviderThreadId.make(`provider-thread:before-handoff:${suffix}`)
+              : providerThreadId,
+          nodeId: NodeId.make(`node:sidebar-usage:${index}:${suffix}`),
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: index + 1,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+          turnTokenUsage: { ...usage, usageScope: "main_agent", hasSubagents: false },
+          ...(index === 2
+            ? {}
+            : {
+                tokenUsage: {
+                  usedTokens: index === 1 ? 312_000 : 100,
+                  maxTokens: index === 1 ? 1_000_000 : 1000,
+                  updatedAt: index === 1 ? "2026-10-19T12:00:01.000Z" : "2026-10-19T12:00:00.000Z",
+                },
+              }),
+        },
+      });
+    }
+    assert.deepEqual((yield* read).usage, {
+      contextUsedTokens: 312_000,
+      contextMaxTokens: 1_000_000,
+      totalTokens: 570,
+      toolUses: 3,
+    });
+    // An older turn may receive the newest context report; zero max means unknown.
+    yield* store.apply({
+      id: EventId.make(`event:sidebar-usage:latest-context:${suffix}`),
+      type: "provider-turn.updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        id: ProviderTurnId.make(`provider-turn:sidebar-usage:0:${suffix}`),
+        providerThreadId,
+        nodeId: NodeId.make(`node:sidebar-usage:0:${suffix}`),
+        runAttemptId: null,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "completed",
+        startedAt: now,
+        completedAt: now,
+        turnTokenUsage: { ...turns[0], usageScope: "main_agent", hasSubagents: false },
+        tokenUsage: { usedTokens: 0, maxTokens: 0, updatedAt: "2026-10-19T12:00:02.000Z" },
+      },
+    });
+    assert.deepEqual((yield* read).usage, { contextUsedTokens: 0, totalTokens: 570, toolUses: 3 });
+    // fork: compare ISO offsets chronologically and resolve ties by insertion order,
+    // even when the later turn id sorts before the earlier entry.
+    for (const [id, updatedAt, usedTokens] of [
+      ["z-offset", "2026-10-20T12:00:00+01:00", 110],
+      ["y-newer", "2026-10-20T11:30:00Z", 115],
+      ["a-tied", "2026-10-20T12:30:00+01:00", 120],
+    ] as const) {
+      yield* store.apply({
+        id: EventId.make(`event:sidebar-context:${id}:${suffix}`),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: ProviderTurnId.make(`provider-turn:sidebar-context:${id}:${suffix}`),
+          providerThreadId: ProviderThreadId.make(
+            `provider-thread:sidebar-context:${id}:${suffix}`,
+          ),
+          nodeId: NodeId.make(`node:sidebar-context:${id}:${suffix}`),
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+          tokenUsage: { usedTokens, updatedAt },
+        },
+      });
+      assert.deepEqual((yield* read).usage, {
+        contextUsedTokens: usedTokens,
+        totalTokens: 570,
+        toolUses: 3,
+      });
+    }
+  });
+for (const archived of [false, true]) {
+  it.effect(`memory sidebar usage (archived=${archived})`, () =>
+    assertSidebarShellUsage(archived).pipe(Effect.provide(ProjectionStore.layerMemory)),
+  );
+}
+
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
+  // fork: SQL must match the in-memory shell without child tool counts.
+  for (const archived of [false, true]) {
+    it.effect(`SQL sidebar usage (archived=${archived})`, () => assertSidebarShellUsage(archived));
+  }
+
   it.effect(
     "SQL recovery selects unfinished runless native subagents",
     () => runlessNativeSubagentNeedsRecovery,

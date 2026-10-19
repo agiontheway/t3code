@@ -1,3 +1,5 @@
+// fork: usage is part of each lightweight thread shell.
+import { SidebarThreadUsage } from "./sidebar/SidebarThreadUsage";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "./ThreadHoverCard";
 import { CollapsibleSectionHeader } from "./ui/collapsible-section-header";
@@ -536,6 +538,8 @@ function SidebarThreadTooltip({
             </div>
           </div>
         ) : null}
+        {/* fork: context, lifetime tokens and tools immediately below the model. */}
+        <SidebarThreadUsage usage={thread.usage} />
         {previousProviderNames.length > 0 ? (
           <div className="flex min-w-0 items-center gap-2">
             <ArrowRightLeftIcon className="size-3 shrink-0 stroke-muted-foreground" />
@@ -1111,7 +1115,8 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
   ),
 };
 
-const SidebarThreadRow = memo(function SidebarThreadRow(props: {
+// fork: expose the real row for hover-card integration coverage.
+export const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   thread: SidebarThreadSummary;
   variant: "card" | "slim";
   // Settled rows un-settle, snoozed rows wake, and cards settle.

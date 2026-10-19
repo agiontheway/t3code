@@ -1,3 +1,5 @@
+// fork: verify shell telemetry survives client presentation.
+import { presentThreadShell } from "./models.ts";
 import {
   EnvironmentId,
   ProjectId,
@@ -336,4 +338,20 @@ describe("v2 thread shell lists", () => {
       harness.registry.dispose();
     }
   });
+});
+
+// fork: mapping preserves reported zeroes as well as unknown usage.
+it("preserves sidebar usage from the shell", () => {
+  const usage = {
+    contextUsedTokens: 312_000,
+    contextMaxTokens: 1_000_000,
+    totalTokens: 1_400_000,
+    toolUses: 87,
+  };
+  expect(presentThreadShell(environmentId, { ...v2ThreadShell, usage }).usage).toEqual(usage);
+  expect(presentThreadShell(environmentId, v2ThreadShell).usage).toBeUndefined();
+  expect(
+    presentThreadShell(environmentId, { ...v2ThreadShell, usage: { totalTokens: 0, toolUses: 0 } })
+      .usage,
+  ).toEqual({ totalTokens: 0, toolUses: 0 });
 });
