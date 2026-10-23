@@ -53,16 +53,17 @@ export function crossProviderAgentEffortOptionId(driver: ProviderDriverKind): st
     : undefined;
 }
 
-const SAME_INSTANCE_NOTE =
-  "Use this only to delegate to a DIFFERENT provider instance than your own; for your own provider use your native spawn/subagent tool. providerInstanceId is authoritative and must come from agent_catalog (never a display name, driver, or model name). childId values are durable T3 thread ids that survive session restarts.";
+// fork: same-instance children use the same visible T3 delegation path as other routes.
+const INSTANCE_TARGETING_NOTE =
+  "Target any instance from agent_catalog, including your own (isCallerInstance). Use agent_spawn for a visible T3 child thread the user can open and talk to, with token/tool usage shown. Your native subagent tool stays available for quick internal helpers. providerInstanceId must be an exact catalog id, never a display name, driver, or model name. childId values survive session restarts.";
 
 export const CROSS_PROVIDER_AGENT_TOOL_DESCRIPTIONS: Record<CrossProviderAgentToolName, string> = {
   agent_catalog:
-    "List the provider instances and exact model ids you may spawn cross-provider children on, plus your orchestration depth. Entries flagged isCallerInstance are your own instance and cannot be targeted. " +
-    SAME_INSTANCE_NOTE,
+    "List eligible provider instances and exact model ids for child threads, plus your orchestration depth. isCallerInstance labels your own instance. " +
+    INSTANCE_TARGETING_NOTE,
   agent_spawn:
-    "Create and start ONE child thread on an exact different provider instance with the given prompt. The child inherits your project, worktree, branch, and permission mode. Returns a durable childId; terminal status and final output are automatically delivered to your conversation when the child settles. Set allowOrchestration only when the child must itself delegate further (costs one depth level). Omit effort to inherit your own reasoning effort when the target model offers it (otherwise the target's default); an effort the target model does not offer is rejected. " +
-    SAME_INSTANCE_NOTE,
+    "Create and start ONE child thread on an exact provider instance with the given prompt. The child inherits your project, worktree, branch, and permission mode. Returns a durable childId; terminal status and final output are automatically delivered to your conversation when the child settles. Set allowOrchestration only when the child must itself delegate further (costs one depth level). Omit effort to inherit your own reasoning effort when the target model offers it (otherwise the target's default); an effort the target model does not offer is rejected. " +
+    INSTANCE_TARGETING_NOTE,
   agent_wait:
     "Return each given owned child's state and, once it settled (completed, error, or interrupted), its final output. Returns within at most 5 seconds. Use it only to retrieve results from a settled child. To wait for a period of time, use the heartbeat tools (t3_heartbeat_create / t3_heartbeat_wakeup) instead. Long outputs are returned as head + tail with truncated:true; fetch the rest with agent_result.",
   agent_result:
@@ -247,7 +248,7 @@ export const CrossProviderAgentErrorCode = Schema.Literals([
   "instance_disabled",
   "instance_unauthenticated",
   "model_not_offered",
-  "same_instance",
+  "same_instance", // fork: no longer emitted; retained so persisted payloads still decode.
   "depth_exceeded",
   "not_owner",
   "child_not_settled",

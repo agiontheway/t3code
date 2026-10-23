@@ -1,13 +1,13 @@
 # Cross-provider agents
 
-A Claude or Codex thread can hand work to a child thread on one of your _other_ configured
+A Claude or Codex thread can hand work to a child thread on any of your eligible configured
 providers: a Claude orchestrator can delegate to your Codex subscription, and a Codex thread can
 delegate to Claude. Each child is an ordinary thread in the same project, worktree, and branch, and
 appears under **Thread details → Lineage** on the parent while it runs, with its status, elapsed
 time, model and effort. Hovering its row also shows the tokens and tool calls the child has used
-so far (`— tok` until its provider reports usage). Delegating inside one provider keeps using T3
-Code's native `delegate_task` tool, which stays available alongside; this feature only covers
-crossing providers.
+so far (`— tok` until its provider reports usage). `agent_spawn` also supports the caller's own
+instance: use it for a visible T3 child you can open and talk to, with token and tool usage shown.
+Native subagent tools stay available for quick internal helpers.
 
 Hover a thread in the sidebar to check its current context usage and limit, lifetime tokens across handoffs, and tool calls, excluding child threads.
 
@@ -75,9 +75,9 @@ flowchart TD
     C["Claude parent thread"] --> M["T3 Code MCP server: agent_* tools"]
     G["Codex parent thread"] --> M
     M --> D["T3 native dispatch: exact instance and model"]
-    D --> O["Other Codex instance"]
-    D --> A["Other Claude instance"]
-    D --> R["Other Claude or Codex instance configured for OpenRouter"]
+    D --> O["Eligible Codex instance"]
+    D --> A["Eligible Claude instance"]
+    D --> R["Eligible Claude or Codex instance configured for OpenRouter"]
     O --> OL["OpenAI models: selected account's subscription or API configuration"]
     A --> AL["Anthropic models: selected account's subscription or API configuration"]
     R --> RL["OpenRouter: selected compatible model and API-key billing"]
@@ -88,9 +88,8 @@ flowchart TD
 ```
 
 The diagram shows alternative destinations. Each spawn selects one exact instance and model;
-T3 does not substitute another provider or silently fall back to OpenRouter. The current caller
-instance is excluded as a cross-provider target. Work inside that same instance continues to use
-native `delegate_task`.
+T3 does not substitute another provider or silently fall back to OpenRouter. The current caller's
+instance can also be targeted when it appears in `agent_catalog`, where `isCallerInstance` labels it.
 
 Claude and Codex are the supported dispatch harnesses. Other labs' models can participate through
 an OpenRouter configuration supported by one of those harnesses, provided the instance exposes
@@ -119,9 +118,9 @@ that harness.
 
 This fork retains T3 Code's existing [remote access](./remote-access.md) and machine load
 balancing. Machine selection places a new parent thread on an environment; cross-provider
-dispatch then selects another provider instance on that environment. Child threads share the
-parent's project, worktree, and branch. Cross-provider dispatch does not itself move a child to
-another machine.
+dispatch then selects an eligible provider instance on that environment, including the parent's.
+Child threads share the parent's project, worktree, and branch. Cross-provider dispatch does not
+itself move a child to another machine.
 
 ## Things to know
 
