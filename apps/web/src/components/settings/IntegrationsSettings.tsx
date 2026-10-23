@@ -1575,7 +1575,7 @@ function CrossProviderAgentAccessSetting() {
       serverScoped
       {...searchableSetting("cross-provider-agent-access")}
       settingKeys={["enableCrossProviderAgentAccess"]}
-      description="Allow agents to start child threads on other configured providers. This may consume those providers' paid quota."
+      description="Allow agents to start child threads on eligible configured provider instances, including their own. This may consume those providers' paid quota."
       status={enabled ? "Applies to sessions started from now on." : undefined}
       resetAction={
         enabled !== DEFAULT_UNIFIED_SETTINGS.enableCrossProviderAgentAccess ? (

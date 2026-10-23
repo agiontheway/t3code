@@ -705,6 +705,98 @@ describe("cross-provider agent toolkit", () => {
     ),
   );
 
+  // fork: every supported harness, including a Codex proxy, can target its own instance.
+  const sameInstanceSelections = [
+    { instanceId: CLAUDE, model: "claude-fable-5-1" },
+    { instanceId: CODEX, model: "gpt-5.6-sol" },
+    { instanceId: CODEX_API_KEY, model: "glm-5.3-flash" },
+  ];
+  it.live.each(sameInstanceSelections)(
+    "catalog includes the caller's eligible $instanceId instance",
+    (modelSelection) =>
+      withEnvironment({}, (_script, cwd) =>
+        Effect.gen(function* () {
+          const root = yield* seedRoot(cwd, { modelSelection });
+          const catalog = succeeded<CrossProviderAgentCatalogOutput>(
+            yield* callTool(root, "agent_catalog", {}),
+          );
+          const ownRoutes = catalog.routes.filter((route) => route.isCallerInstance);
+          assert.strictEqual(ownRoutes.length, 1);
+          assert.strictEqual(ownRoutes[0]?.providerInstanceId, modelSelection.instanceId);
+          assert.include(
+            ownRoutes[0]!.models.map((model) => model.slug),
+            modelSelection.model,
+          );
+        }),
+      ),
+  );
+
+  it.live.each(sameInstanceSelections)(
+    "same-instance $instanceId spawn creates owned children within the depth cap",
+    (modelSelection) =>
+      withEnvironment({}, (_script, cwd) =>
+        Effect.gen(function* () {
+          const root = yield* seedRoot(cwd, { modelSelection });
+          const args = {
+            providerInstanceId: modelSelection.instanceId,
+            model: modelSelection.model,
+            prompt: `${KEEP_RUNNING} same-instance work`,
+          };
+          const grants = yield* DelegationGrants.DelegationGrants;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          let caller = root;
+          for (const callerDepth of [0, 1]) {
+            const catalog = succeeded<CrossProviderAgentCatalogOutput>(
+              yield* callTool(caller, "agent_catalog", {}),
+            );
+            assert.strictEqual(catalog.callerDepth, callerDepth);
+            const handle = yield* spawn(caller, {
+              ...args,
+              allowOrchestration: callerDepth === 0,
+            });
+            assert.strictEqual(handle.providerInstanceId, modelSelection.instanceId);
+            assert.strictEqual(handle.model, modelSelection.model);
+            const childId = ThreadId.make(handle.childId);
+            const child = yield* childShell(childId);
+            assert.deepStrictEqual(child.lineage, {
+              parentThreadId: caller.thread!.threadId,
+              relationshipToParent: "subagent",
+              rootThreadId: ROOT,
+            });
+            assert.strictEqual(child.modelSelection.instanceId, modelSelection.instanceId);
+            assert.strictEqual(child.modelSelection.model, modelSelection.model);
+            assert.deepInclude(Option.getOrThrow(yield* grants.read(childId)), {
+              parentThreadId: caller.thread!.threadId,
+              depth: catalog.callerDepth + 1,
+              allowOrchestration: callerDepth === 0,
+            });
+            const parent = yield* orchestrator.getThreadProjection(caller.thread!.threadId);
+            assert.deepInclude(
+              parent.subagents.find((task) => task.id === handle.taskId),
+              {
+                origin: "app_owned",
+                childThreadId: childId,
+              },
+            );
+            yield* waitUntilRunning(childId);
+            failedWith(yield* callTool(caller, "agent_result", { childId }), "child_not_settled");
+            caller = threadScope(childId, modelSelection.instanceId);
+          }
+
+          const leafCatalog = succeeded<CrossProviderAgentCatalogOutput>(
+            yield* callTool(caller, "agent_catalog", {}),
+          );
+          assert.strictEqual(leafCatalog.callerDepth, leafCatalog.maxDepth);
+          // Even a stale credential with orchestration granted cannot exceed maxDepth.
+          failedWith(yield* callTool(caller, "agent_spawn", args), "depth_exceeded");
+          assert.deepStrictEqual(
+            (yield* orchestrator.getThreadProjection(caller.thread!.threadId)).subagents,
+            [],
+          );
+        }),
+      ),
+  );
+
   it.live(
     "spawn creates an owned native child with the fork shape, grant and inherited effort",
     () =>
@@ -805,14 +897,6 @@ describe("cross-provider agent toolkit", () => {
       Effect.gen(function* () {
         const root = yield* seedRoot(cwd);
         const base = { model: "gpt-5.6-sol", prompt: "x" };
-        failedWith(
-          yield* callTool(root, "agent_spawn", {
-            ...base,
-            providerInstanceId: CLAUDE,
-            model: "claude-haiku-4-5",
-          }),
-          "same_instance",
-        );
         failedWith(
           yield* callTool(root, "agent_spawn", { ...base, providerInstanceId: CODEX_WORK }),
           "instance_unauthenticated",

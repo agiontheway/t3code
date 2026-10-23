@@ -1,8 +1,8 @@
 /**
  * fork: the cross-provider agent tools (`agent_*`) as aliases over the native delegated-task
  * substrate. Children are native app-owned delegated tasks; this layer keeps the 0.0.45 inputs,
- * outputs and error codes and adds what native lacks: the route allowlist, same-instance
- * refusal, the Claude/Codex driver filter, effort inheritance, the head + tail output cap,
+ * outputs and error codes and adds what native lacks: the route allowlist,
+ * the Claude/Codex driver filter, effort inheritance, the head + tail output cap,
  * multi-child waits (clamped and rate limited, see `waitGuard.ts`) and ownership by any
  * ancestor. Depth and the orchestration grant are applied by `DelegationPolicy` inside
  * `OrchestratorMcpService.delegateTask`.
@@ -331,14 +331,6 @@ const make = Effect.gen(function* () {
           });
         }
         const targetInstanceId = ProviderInstanceId.make(input.providerInstanceId);
-        if (targetInstanceId === callerProvider.instanceId) {
-          return yield* fail({
-            code: "same_instance",
-            message:
-              "That is your own provider instance; use your native spawn tool for same-provider children.",
-            providerInstanceId: targetInstanceId,
-          });
-        }
         const target = providers.find((provider) => provider.instanceId === targetInstanceId);
         const supportedTarget =
           target !== undefined && CROSS_PROVIDER_AGENT_SUPPORTED_DRIVERS.includes(target.driver);
