@@ -1,3 +1,4 @@
+import * as DocumentText from "../../provider/DocumentText.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -66,7 +67,7 @@ const layerTest = ThreadManagementService.layer.pipe(
 
 // Client intake reads server config only on paths these refusals never reach.
 const layerIntake = ServerConfig.layerTest(process.cwd(), { prefix: "t3-start-if-idle-" }).pipe(
-  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
 );
 
 type MessageDispatch = Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>;

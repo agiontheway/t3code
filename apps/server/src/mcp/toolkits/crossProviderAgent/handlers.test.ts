@@ -1,3 +1,4 @@
+import { RemoteDelegation } from "../../../peer/RemoteDelegation.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -479,8 +480,9 @@ const makeLayer = (input: {
   return Layer.merge(
     McpHttpServer.layerCrossProviderAgentToolkit,
     // Native delegate_task, for children the aliases did not spawn.
-    OrchestratorMcpService.layer,
+    OrchestratorMcpService.layer.pipe(Layer.provide(Layer.mock(RemoteDelegation)({}))),
   ).pipe(
+    Layer.provide(Layer.mock(RemoteDelegation)({})),
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(layerOrchestration),
     Layer.provideMerge(DelegationPolicy.layer.pipe(Layer.provideMerge(layerGrants))),
@@ -1439,7 +1441,11 @@ describe("automatic result delivery in the parent wake", () => {
           script.responses.set(prompt, "A".repeat(400) + "Z".repeat(400));
           const handle = yield* spawn(root, { ...SOL, prompt });
 
-          const [payload] = payloadsOf(yield* awaitWake(ROOT, handle.taskId));
+          const wake = yield* awaitWake(ROOT, handle.taskId);
+          // Upstream also inlines native results; it must not duplicate uncapped alias output.
+          assert.notInclude(wake.text, "A".repeat(400));
+          assert.notInclude(wake.text, "Z".repeat(400));
+          const [payload] = payloadsOf(wake);
           assert.strictEqual(payload?.truncated, true);
           assert.strictEqual(payload?.totalChars, 800);
           const output = payload?.output as string;
@@ -1463,7 +1469,11 @@ describe("automatic result delivery in the parent wake", () => {
           mode: "async",
         });
         const nativeWake = yield* awaitWake(ROOT, delegated.taskId);
-        assert.strictEqual(nativeWake.text, nativeWakeText(delegated.taskId));
+        // Upstream now includes native results inline. Alias wakes retain the fork payload.
+        assert.strictEqual(
+          nativeWake.text,
+          `Delegated task ${delegated.taskId} [completed]:\nnative answer`,
+        );
         // Reading the result natively consumes that wake.
         yield* native.taskStatus(root, delegated.taskId);
 

@@ -1,3 +1,7 @@
+import {
+  formatSubagentTokenCount,
+  type SubagentUsage,
+} from "@t3tools/client-runtime/state/subagentRuntime"; // fork
 import type {
   OrchestrationV2ThreadShell,
   OrchestrationV2TurnItemStatus,
@@ -11,10 +15,7 @@ import {
   resolveSubagentMetadata,
   subagentDetailPreview,
 } from "@t3tools/client-runtime/state/subagent-display";
-import {
-  formatSubagentTokenCount,
-  type SubagentUsage,
-} from "@t3tools/client-runtime/state/subagentRuntime"; // fork
+import { REASONING_EFFORT_OPTION_IDS } from "@t3tools/client-runtime/state/thread-execution";
 import { getModelSelectionStringOptionValue, resolveSelectableModel } from "@t3tools/shared/model";
 import { getTraitsSpeedDisplay, TraitsSpeedIcon } from "./TraitsSpeed";
 import type { ReactNode } from "react";
@@ -33,7 +34,6 @@ import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
 import { deriveProviderInstanceEntries, shouldShowInstanceBadge } from "../../providerInstances";
 
-/** Geometry and preview limits stay identical in lineage and timeline tooltips. */
 export function SubagentTooltipContent(props: {
   title: string;
   model: string | null;
@@ -41,7 +41,6 @@ export function SubagentTooltipContent(props: {
   origin: OrchestrationV2Subagent["origin"];
   modelSelection?: OrchestrationV2Subagent["modelSelection"];
   provider?: ServerProvider | undefined;
-  /** The environment's instances; with several accounts on one provider, the card names this one. */
   providers?: ReadonlyArray<ServerProvider> | undefined;
   driver?: ProviderDriverKind | undefined;
   elapsed?: ReactNode;
@@ -83,9 +82,9 @@ export function SubagentTooltipContent(props: {
     childModel === (modelSlug ?? model) && childSelection?.instanceId === props.providerInstanceId
       ? childSelection
       : undefined;
-  const effort = ["reasoningEffort", "effort", "reasoning", "variant"]
-    .map((id) => getModelSelectionStringOptionValue(matchingSelection, id))
-    .find(Boolean);
+  const effort = REASONING_EFFORT_OPTION_IDS.map((id) =>
+    getModelSelectionStringOptionValue(matchingSelection, id),
+  ).find(Boolean);
   const speed = provider
     ? providerModel?.capabilities?.optionDescriptors
         ?.map((descriptor) => {
@@ -138,7 +137,6 @@ export function SubagentTooltipContent(props: {
             displayName={entry?.displayName ?? props.provider?.displayName ?? driver}
             accentColor={entry?.accentColor}
             acpRegistryIconUrl={props.provider?.iconUrl}
-            // Same treatment as the sidebar card: accent dot, account in the label.
             showBadge={showInstanceBadge && entry?.accentColor !== undefined}
             badgeContent="none"
             badgeClassName="h-2 min-w-2 px-0"

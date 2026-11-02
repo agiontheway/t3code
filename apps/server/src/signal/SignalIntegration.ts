@@ -106,20 +106,22 @@ const make = Effect.gen(function* () {
   const lock = yield* Semaphore.make(1);
   const directory = join(config.stateDir, "signal");
   const bindingPath = join(directory, "binding.json");
-  const write = (path: string, value: unknown) =>
+  const write = Effect.fn("write")((path: string, value: unknown) =>
     Effect.gen(function* () {
       yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
       const tmp = `${path}.${NodeCrypto.randomUUID()}.tmp`;
       yield* fs.writeFileString(tmp, yield* encodeJson(value), { mode: 0o600 });
       yield* fs.rename(tmp, path);
-    }).pipe(Effect.mapError(() => fail("storage_unavailable")));
-  const read = <A>(path: string) =>
+    }).pipe(Effect.mapError(() => fail("storage_unavailable"))),
+  );
+  const read = Effect.fn("read")(<A>(path: string) =>
     Effect.gen(function* () {
       if (!(yield* fs.exists(path))) return null;
       const contents = yield* fs.readFileString(path);
       return (yield* decodeJson(contents)) as A;
-    }).pipe(Effect.mapError(() => fail("storage_unavailable")));
-  const target = (threadId: ThreadId) =>
+    }).pipe(Effect.mapError(() => fail("storage_unavailable"))),
+  );
+  const target = Effect.fn("target")((threadId: ThreadId) =>
     Effect.gen(function* () {
       const thread = yield* threads
         .getThreadShell(threadId)
@@ -127,8 +129,9 @@ const make = Effect.gen(function* () {
       if (thread === null || thread.archivedAt !== null || thread.deletedAt !== null)
         return yield* fail("target_unavailable");
       return thread;
-    });
-  const choices = (threadId: ThreadId) =>
+    }),
+  );
+  const choices = Effect.fn("choices")((threadId: ThreadId) =>
     Effect.gen(function* () {
       const thread = yield* target(threadId);
       const project = yield* projects
@@ -150,7 +153,8 @@ const make = Effect.gen(function* () {
       return skills
         .filter((s) => s.enabled && /^[a-zA-Z][a-zA-Z0-9:_-]{0,100}$/.test(s.name))
         .map((s) => s.name);
-    });
+    }),
+  );
   const get = read<StoredBinding>(bindingPath).pipe(Effect.map((s) => s?.binding ?? null));
   const configure = (input: SignalConfigure) =>
     lock.withPermit(

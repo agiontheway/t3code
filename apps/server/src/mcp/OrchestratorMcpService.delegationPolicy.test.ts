@@ -1,3 +1,4 @@
+import { RemoteDelegation } from "../peer/RemoteDelegation.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -212,7 +213,14 @@ const delegateWithPolicy = (input: {
           input.fork,
         )
         .pipe(Effect.result);
-    }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+    }).pipe(
+      Effect.provide(
+        OrchestratorMcpService.layer.pipe(
+          Layer.provide(Layer.mock(RemoteDelegation)({})),
+          Layer.provide(layerDependencies),
+        ),
+      ),
+    );
     return {
       result,
       admissions: yield* Ref.get(admissions),

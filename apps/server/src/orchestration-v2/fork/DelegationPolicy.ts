@@ -39,7 +39,7 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
 
   return DelegationPolicy.of({
-    admit: (input) =>
+    admit: Effect.fn("DelegationPolicy.admit")((input) =>
       Effect.gen(function* () {
         if (!input.scope.capabilities.has("delegation")) {
           return yield* failure(
@@ -92,6 +92,7 @@ const make = Effect.gen(function* () {
             ),
           );
       }),
+    ),
   });
 });
 
