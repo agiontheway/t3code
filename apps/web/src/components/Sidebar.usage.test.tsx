@@ -43,7 +43,7 @@ vi.mock("../composerDraftStore", async (importOriginal) => ({
 }));
 vi.mock("./Sidebar.logic", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./Sidebar.logic")>()),
-  useSidebarRowSubscriptionLease: () => ({ leaseLiveStatus: false, rowRef: null }),
+  useSidebarRowSubscriptionLease: () => ({ leaseLiveStatus: false, rowRef: () => undefined }),
 }));
 vi.mock("./ThreadStatusIndicators", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./ThreadStatusIndicators")>()),
@@ -51,7 +51,7 @@ vi.mock("./ThreadStatusIndicators", async (importOriginal) => ({
   ThreadTerminalStatusButton: () => null,
 }));
 
-import { SidebarThreadRow } from "./Sidebar";
+import { SidebarThreadRow } from "./sidebar/SidebarThreadRow";
 
 let renderer: ReactTestRenderer;
 afterEach(async () => {
@@ -94,6 +94,7 @@ const rowProps: ComponentProps<typeof SidebarThreadRow> = {
   snoozeWakeLabelText: null,
   wokeAt: null,
   isActive: false,
+  isRouteThread: false,
   openPullRequestsInRightPanel: false,
   jumpLabel: null,
   currentEnvironmentId: thread.environmentId,
@@ -106,7 +107,6 @@ const rowProps: ComponentProps<typeof SidebarThreadRow> = {
   timestampFormat: "locale",
   isRenaming: false,
   renamingTitle: "",
-  changeRequestSnapshot: null,
   onThreadClick: vi.fn(),
   onThreadActivate: vi.fn(),
   onStartRename: vi.fn(),
@@ -121,7 +121,6 @@ const rowProps: ComponentProps<typeof SidebarThreadRow> = {
   onUnsnooze: vi.fn(),
   onUnpin: vi.fn(),
   onAcknowledgeWoke: vi.fn(),
-  onChangeRequestSnapshot: vi.fn(),
 };
 
 it.each(["slim", "card"] as const)(

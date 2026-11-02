@@ -30,7 +30,7 @@ export type LegacySpawns = ReadonlyMap<string, LegacySpawn>;
  * Every decodable v1 spawn row, keyed by child thread id. Empty when the database never ran the
  * fork's spawn or grant migrations.
  */
-export const loadLegacySpawns = (sql: SqlClient.SqlClient) =>
+export const loadLegacySpawns = Effect.fn("loadLegacySpawns")((sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
     const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
     const grantTables = yield* sql<{ readonly name: string }>`
@@ -52,7 +52,8 @@ export const loadLegacySpawns = (sql: SqlClient.SqlClient) =>
       }
     }
     return spawns as LegacySpawns;
-  });
+  }),
+);
 
 /** The v2 lineage for a legacy child, or none for a v1 thread that was not spawned. */
 export function legacySpawnLineage(threadId: ThreadId, spawns: LegacySpawns) {

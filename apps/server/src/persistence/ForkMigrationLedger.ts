@@ -28,14 +28,15 @@ const PULL_REQUEST_COLUMNS = [
   "stack_json",
 ];
 
-const columnNames = (table: string) =>
+const columnNames = Effect.fn("columnNames")((table: string) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const columns = yield* sql<{
       readonly name: string;
     }>`SELECT name FROM pragma_table_info(${table})`;
     return new Set(columns.map((column) => column.name));
-  });
+  }),
+);
 
 /**
  * The 0.0.39 fork recorded its spawn schema under upstream's id 50. Run the real 50 and rename the

@@ -1,50 +1,56 @@
-import { ProviderInstanceId, type ServerConfig } from "@t3tools/contracts";
-import { describe, expect, it } from "@effect/vitest";
+import type { ServerConfig, ServerConfigStreamEvent } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import { describe, expect, it } from "vite-plus/test";
 
-import { applyServerConfigProjection } from "./serverConfigProjection.ts";
+import { applyServerConfigProjection, reuseUnchanged } from "./serverConfigProjection.ts";
 
-const CODEX = ProviderInstanceId.make("codex");
-const CLAUDE = ProviderInstanceId.make("claudeAgent");
-
-const CONFIG = {
-  availableEditors: [],
-  issues: [],
-  keybindings: {},
-  keybindingsConfigPath: null,
-  observability: null,
-  providers: [],
-  settings: {},
-  environment: { capabilities: {} },
-  crossProviderAgentRouteDefaults: { [CODEX]: { enabled: true, models: [] } },
-} as unknown as ServerConfig;
-
-// fork
-describe("cross-provider route defaults projection", () => {
-  const snapshot = applyServerConfigProjection(Option.none(), {
-    version: 1,
-    type: "snapshot",
-    config: CONFIG,
+describe("reuseUnchanged", () => {
+  const provider = (checkedAt: string, skills: ReadonlyArray<string>) => ({
+    instanceId: "claude",
+    checkedAt,
+    models: [{ slug: "opus", name: "Opus" }],
+    skills: skills.map((name) => ({ name })),
   });
 
-  it("replaces the route defaults with the ones a provider change carries", () => {
-    const defaults = { [CLAUDE]: { enabled: true, models: [] } };
-    const projected = applyServerConfigProjection(snapshot, {
-      version: 1,
-      type: "providerStatuses",
-      payload: { providers: [], crossProviderAgentRouteDefaults: defaults },
-    });
-    expect(Option.getOrThrow(projected).config.crossProviderAgentRouteDefaults).toEqual(defaults);
+  it("takes the new value when keys or lengths change", () => {
+    const previous = [provider("a", ["x"])];
+    const next = reuseUnchanged(previous, [provider("a", ["x", "z"])]);
+    expect(next[0]!.skills).toHaveLength(2);
+    expect(next[0]!.models).toBe(previous[0]!.models);
+    const dropped = reuseUnchanged({ a: 1, b: 2 }, { a: 1 });
+    expect(dropped).toEqual({ a: 1 });
   });
+});
 
-  it("keeps the snapshot's route defaults when an older server omits them", () => {
-    const projected = applyServerConfigProjection(snapshot, {
-      version: 1,
-      type: "providerStatuses",
-      payload: { providers: [] },
+describe("applyServerConfigProjection settingsUpdated", () => {
+  it("keeps unchanged settings sections when one field changes", () => {
+    const settings = {
+      favorites: [{ provider: "claude", model: "opus" }],
+      providerInstances: {
+        claude: { driver: "claudeAgent", config: { launchArgs: "" } },
+        codex: { driver: "codex" },
+      },
+    };
+    const current = Option.some({
+      config: { settings } as unknown as ServerConfig,
+      latestEvent: {} as ServerConfigStreamEvent,
+      source: "live" as const,
     });
-    expect(Option.getOrThrow(projected).config.crossProviderAgentRouteDefaults).toEqual(
-      CONFIG.crossProviderAgentRouteDefaults,
-    );
+    const next = applyServerConfigProjection(current, {
+      type: "settingsUpdated",
+      payload: {
+        settings: {
+          favorites: [{ provider: "claude", model: "opus" }],
+          providerInstances: {
+            claude: { driver: "claudeAgent", config: { launchArgs: "--verbose" } },
+            codex: { driver: "codex" },
+          },
+        },
+      },
+    } as unknown as ServerConfigStreamEvent);
+    const nextSettings = Option.getOrThrow(next).config.settings as unknown as typeof settings;
+    expect(nextSettings.favorites).toBe(settings.favorites);
+    expect(nextSettings.providerInstances.codex).toBe(settings.providerInstances.codex);
+    expect(nextSettings.providerInstances.claude.config.launchArgs).toBe("--verbose");
   });
 });

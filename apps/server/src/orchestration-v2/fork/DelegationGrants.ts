@@ -133,13 +133,14 @@ const make = Effect.gen(function* () {
     selectRow(threadId).pipe(Effect.mapError(toRepositoryError("DelegationGrants.read")));
 
   return DelegationGrants.of({
-    record: (input) =>
+    record: Effect.fn("DelegationGrants.record")((input) =>
       Effect.gen(function* () {
         const createdAt = DateTime.formatIso(yield* DateTime.now);
         yield* insertRow({ ...input, createdAt });
       }).pipe(Effect.mapError(toRepositoryError("DelegationGrants.record"))),
+    ),
     read,
-    depthOf: (threadId) =>
+    depthOf: Effect.fn("DelegationGrants.depthOf")((threadId) =>
       read(threadId).pipe(
         Effect.map(
           Option.match({
@@ -148,16 +149,19 @@ const make = Effect.gen(function* () {
           }),
         ),
       ),
-    markAliasOwned: (childThreadId) =>
+    ),
+    markAliasOwned: Effect.fn("DelegationGrants.markAliasOwned")((childThreadId) =>
       Effect.gen(function* () {
         const createdAt = DateTime.formatIso(yield* DateTime.now);
         yield* insertAliasOwned({ childThreadId, createdAt });
       }).pipe(Effect.mapError(toRepositoryError("DelegationGrants.markAliasOwned"))),
-    isAliasOwned: (childThreadId) =>
+    ),
+    isAliasOwned: Effect.fn("DelegationGrants.isAliasOwned")((childThreadId) =>
       selectAliasOwned(childThreadId).pipe(
         Effect.map(Option.isSome),
         Effect.mapError(toRepositoryError("DelegationGrants.isAliasOwned")),
       ),
+    ),
   });
 });
 

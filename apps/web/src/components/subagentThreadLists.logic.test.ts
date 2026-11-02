@@ -36,12 +36,14 @@ describe("withoutSubagentThreads", () => {
   it("keeps a spawned child out of the command palette's thread items", () => {
     const items = buildThreadActionItems({
       threads: withoutSubagentThreads(threads(null)),
-      projectTitleById: new Map([[PROJECT_ID, "Project"]]),
-      sortOrder: "updated_at",
+      projectByKey: new Map(),
       icon: null,
       runThread: async () => undefined,
     });
-    expect(items.map((item) => item.value)).toEqual([`thread:${PARENT_ID}`, `thread:${FORK_ID}`]);
+    expect(items.map((item) => item.value)).toEqual([
+      `thread:${threads(null)[0]!.environmentId}:${PARENT_ID}`,
+      `thread:${threads(null)[0]!.environmentId}:${FORK_ID}`,
+    ]);
   });
 
   it("drops archived subagent threads while keeping their archived parent and forks", () => {

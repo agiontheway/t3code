@@ -159,7 +159,7 @@ const make = Effect.gen(function* () {
       orInternal("readThread"),
     );
 
-  const callerContext = (scope: McpInvocationScope) =>
+  const callerContext = Effect.fn("callerContext")((scope: McpInvocationScope) =>
     Effect.gen(function* () {
       const settings = yield* serverSettings.getSettings.pipe(orInternal("readSettings"));
       if (!settings.enableCrossProviderAgentAccess) {
@@ -214,64 +214,67 @@ const make = Effect.gen(function* () {
         callerProvider,
         callerDepth,
       } satisfies CallerContext;
-    });
+    }),
+  );
 
   /** The caller owns a child when it is the parent or any ancestor in the subagent chain. */
-  const resolveOwnedChild = (context: CallerContext, rawChildId: string) =>
-    Effect.gen(function* () {
-      const notOwner = fail({
-        code: "not_owner",
-        message: "No child with that id is owned by this thread.",
-        childId: rawChildId,
-      });
-      if (!isThreadId(rawChildId)) return yield* notOwner;
-      const childThreadId = ThreadId.make(rawChildId);
-      const child = yield* readShell(childThreadId);
-      const parentThreadId = child?.lineage.parentThreadId ?? null;
-      if (
-        child === null ||
-        parentThreadId === null ||
-        child.lineage.relationshipToParent !== "subagent"
-      ) {
-        return yield* notOwner;
-      }
-      let cursor: OrchestrationV2ThreadShell = child;
-      let owned = false;
-      for (let hops = 0; hops < MAX_OWNERSHIP_HOPS; hops += 1) {
-        const ancestorId = cursor.lineage.parentThreadId;
-        if (cursor.lineage.relationshipToParent !== "subagent" || ancestorId === null) break;
-        if (ancestorId === context.scope.thread.threadId) {
-          owned = true;
-          break;
+  const resolveOwnedChild = Effect.fn("resolveOwnedChild")(
+    (context: CallerContext, rawChildId: string) =>
+      Effect.gen(function* () {
+        const notOwner = fail({
+          code: "not_owner",
+          message: "No child with that id is owned by this thread.",
+          childId: rawChildId,
+        });
+        if (!isThreadId(rawChildId)) return yield* notOwner;
+        const childThreadId = ThreadId.make(rawChildId);
+        const child = yield* readShell(childThreadId);
+        const parentThreadId = child?.lineage.parentThreadId ?? null;
+        if (
+          child === null ||
+          parentThreadId === null ||
+          child.lineage.relationshipToParent !== "subagent"
+        ) {
+          return yield* notOwner;
         }
-        const ancestor = yield* readShell(ancestorId);
-        if (ancestor === null) break;
-        cursor = ancestor;
-      }
-      if (!owned) return yield* notOwner;
+        let cursor: OrchestrationV2ThreadShell = child;
+        let owned = false;
+        for (let hops = 0; hops < MAX_OWNERSHIP_HOPS; hops += 1) {
+          const ancestorId = cursor.lineage.parentThreadId;
+          if (cursor.lineage.relationshipToParent !== "subagent" || ancestorId === null) break;
+          if (ancestorId === context.scope.thread.threadId) {
+            owned = true;
+            break;
+          }
+          const ancestor = yield* readShell(ancestorId);
+          if (ancestor === null) break;
+          cursor = ancestor;
+        }
+        if (!owned) return yield* notOwner;
 
-      const { subagents } = yield* threads
-        .getThreadRecords(parentThreadId, ["subagents"])
-        .pipe(orInternal("readChild"));
-      const tasks = subagents.filter(
-        (task) =>
-          task.origin === "app_owned" &&
-          task.threadId === parentThreadId &&
-          task.childThreadId === childThreadId,
-      );
-      if (tasks.length === 0) return yield* notOwner;
-      // A follow-up is a fresh task in the same child thread; the newest run names the latest.
-      const taskIds = new Set(tasks.map((task) => task.id));
-      const { runs } = yield* threads
-        .getThreadRecords(childThreadId, ["runs"])
-        .pipe(orInternal("readChild"));
-      const latestRun = runs
-        .filter((run) => run.delegatedTaskId !== undefined && taskIds.has(run.delegatedTaskId))
-        .toSorted((left, right) => right.ordinal - left.ordinal)[0];
-      const task =
-        tasks.find((candidate) => candidate.id === latestRun?.delegatedTaskId) ?? tasks[0]!;
-      return { childThreadId, parentThreadId, taskId: task.id } satisfies OwnedChild;
-    });
+        const { subagents } = yield* threads
+          .getThreadRecords(parentThreadId, ["subagents"])
+          .pipe(orInternal("readChild"));
+        const tasks = subagents.filter(
+          (task) =>
+            task.origin === "app_owned" &&
+            task.threadId === parentThreadId &&
+            task.childThreadId === childThreadId,
+        );
+        if (tasks.length === 0) return yield* notOwner;
+        // A follow-up is a fresh task in the same child thread; the newest run names the latest.
+        const taskIds = new Set(tasks.map((task) => task.id));
+        const { runs } = yield* threads
+          .getThreadRecords(childThreadId, ["runs"])
+          .pipe(orInternal("readChild"));
+        const latestRun = runs
+          .filter((run) => run.delegatedTaskId !== undefined && taskIds.has(run.delegatedTaskId))
+          .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+        const task =
+          tasks.find((candidate) => candidate.id === latestRun?.delegatedTaskId) ?? tasks[0]!;
+        return { childThreadId, parentThreadId, taskId: task.id } satisfies OwnedChild;
+      }),
+  );
 
   const readChildTask = (context: CallerContext, child: OwnedChild) =>
     orchestrator
@@ -279,7 +282,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.catch(fromNative({ childId: child.childThreadId })));
 
   return CrossProviderAgentMcpService.of({
-    catalog: (scope) =>
+    catalog: Effect.fn("CrossProviderAgentMcpService.catalog")((scope) =>
       Effect.gen(function* () {
         const context = yield* callerContext(scope);
         // Never offer a route native delegation would refuse.
@@ -318,8 +321,9 @@ const make = Effect.gen(function* () {
           callerDepth: context.callerDepth,
         };
       }),
+    ),
 
-    spawn: (scope, input) =>
+    spawn: Effect.fn("CrossProviderAgentMcpService.spawn")((scope, input) =>
       Effect.gen(function* () {
         const context = yield* callerContext(scope);
         const { settings, shell: parent, providers, callerProvider } = context;
@@ -420,6 +424,12 @@ const make = Effect.gen(function* () {
           .pipe(
             Effect.catch(fromNative({ providerInstanceId: targetInstanceId, model: input.model })),
           );
+        // fork: aliases only launch local children; remote task rows may have no local child.
+        if (delegated.childThreadId === null)
+          return yield* fail({
+            code: "internal",
+            message: "Local delegation returned no child thread.",
+          });
         yield* Effect.logInfo("cross-provider agent spawned", {
           parentThreadId: parent.id,
           childThreadId: delegated.childThreadId,
@@ -437,8 +447,9 @@ const make = Effect.gen(function* () {
           status: "running" as const,
         };
       }),
+    ),
 
-    wait: (scope, input) =>
+    wait: Effect.fn("CrossProviderAgentMcpService.wait")((scope, input) =>
       Effect.gen(function* () {
         const context = yield* callerContext(scope);
         if (!(yield* waitRateLimiter.admit(context.scope.thread.threadId))) {
@@ -477,8 +488,9 @@ const make = Effect.gen(function* () {
         }
         return { children: entries };
       }),
+    ),
 
-    result: (scope, input) =>
+    result: Effect.fn("CrossProviderAgentMcpService.result")((scope, input) =>
       Effect.gen(function* () {
         const context = yield* callerContext(scope);
         const child = yield* resolveOwnedChild(context, input.childId);
@@ -521,8 +533,9 @@ const make = Effect.gen(function* () {
           length: slice.length,
         };
       }),
+    ),
 
-    followUp: (scope, input) =>
+    followUp: Effect.fn("CrossProviderAgentMcpService.followUp")((scope, input) =>
       Effect.gen(function* () {
         const context = yield* callerContext(scope);
         const child = yield* resolveOwnedChild(context, input.childId);
@@ -557,8 +570,9 @@ const make = Effect.gen(function* () {
           .pipe(Effect.catch(fromNative({ childId: child.childThreadId })));
         return { childId: child.childThreadId, status: "running" as const };
       }),
+    ),
 
-    interrupt: (scope, input) =>
+    interrupt: Effect.fn("CrossProviderAgentMcpService.interrupt")((scope, input) =>
       Effect.gen(function* () {
         const context = yield* callerContext(scope);
         const child = yield* resolveOwnedChild(context, input.childId);
@@ -576,6 +590,7 @@ const make = Effect.gen(function* () {
         if (interrupted.status !== "interrupt_requested") return yield* notRunning;
         return { childId: child.childThreadId, status: "interrupting" as const };
       }),
+    ),
   });
 });
 

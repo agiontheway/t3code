@@ -87,7 +87,7 @@ export const make = Effect.gen(function* () {
         ),
       );
 
-  const accessFor = (threadId: ThreadId) =>
+  const accessFor = Effect.fn("accessFor")((threadId: ThreadId) =>
     Effect.gen(function* () {
       const thread = yield* threads.getThreadShell(threadId);
       if (thread === null || thread.deletedAt !== null) return false;
@@ -95,7 +95,8 @@ export const make = Effect.gen(function* () {
     }).pipe(
       Effect.provideService(DelegationGrants, grants),
       Effect.catchCause(() => Effect.succeed(false)),
-    );
+    ),
+  );
 
   const outcomeForOccurrence = (
     occurrence: ReservedHeartbeatOccurrence,
@@ -167,7 +168,9 @@ export const make = Effect.gen(function* () {
       },
     });
 
-  const attemptReserved: HeartbeatAdmissionReactor["Service"]["attemptReserved"] = (occurrence) =>
+  const attemptReserved: HeartbeatAdmissionReactor["Service"]["attemptReserved"] = Effect.fn(
+    "attemptReserved",
+  )((occurrence) =>
     Effect.gen(function* () {
       // Validation and serialized dispatch share the scheduler mutation lock.
       const attempt = yield* scheduler
@@ -231,17 +234,21 @@ export const make = Effect.gen(function* () {
         cause: Cause.pretty(cause),
       });
       return "defer";
-    });
+    }),
+  );
 
-  const processReserved: HeartbeatAdmissionReactor["Service"]["processReserved"] = (occurrence) =>
+  const processReserved: HeartbeatAdmissionReactor["Service"]["processReserved"] = Effect.fn(
+    "processReserved",
+  )((occurrence) =>
     Effect.gen(function* () {
       while ((yield* attemptReserved(occurrence)) === "defer") {
         yield* Effect.sleep(Duration.seconds(1));
       }
-    });
+    }),
+  );
 
   // The heartbeat's own run: running means its provider accepted the turn.
-  const recordSendOutcome = (run: OrchestrationV2Run) =>
+  const recordSendOutcome = Effect.fn("recordSendOutcome")((run: OrchestrationV2Run) =>
     Effect.gen(function* () {
       const occurrenceId = HeartbeatOccurrenceId.make(
         run.userMessageId.slice(HEARTBEAT_MESSAGE_ID_PREFIX.length),
@@ -263,10 +270,11 @@ export const make = Effect.gen(function* () {
             error: `Heartbeat run ended ${run.status} before its provider turn started.`,
           });
       }
-    });
+    }),
+  );
 
   // Interrupt and Stop write the same events; the command's receipt tells them apart.
-  const cancelForCommand = (stored: OrchestrationV2StoredEvent) =>
+  const cancelForCommand = Effect.fn("cancelForCommand")((stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
       if (stored.commandId === null) return;
       const receipt = yield* receipts.getByCommandId({ commandId: stored.commandId });
@@ -278,7 +286,8 @@ export const make = Effect.gen(function* () {
       if (receipt.value.commandType === "thread.stop") {
         return yield* scheduler.cancelThread(threadId, "session stopped", stored.sequence);
       }
-    });
+    }),
+  );
 
   const handleStoredEvent: HeartbeatAdmissionReactor["Service"]["handleStoredEvent"] = (stored) => {
     const event = stored.event;

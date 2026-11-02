@@ -13,17 +13,19 @@ const isThreadId = Schema.is(ThreadId);
 const childThread = <P extends { readonly childId: string }>(input: P) =>
   isThreadId(input.childId) ? [input.childId] : [];
 
-const withService = <A, E, R>(
-  use: (
-    service: CrossProviderAgentMcpService.CrossProviderAgentMcpService["Service"],
-    scope: McpInvocationContext.McpInvocationScope,
-  ) => Effect.Effect<A, E, R>,
-) =>
-  Effect.gen(function* () {
-    const scope = yield* McpInvocationContext.McpInvocationContext;
-    const service = yield* CrossProviderAgentMcpService.CrossProviderAgentMcpService;
-    return yield* use(service, scope);
-  });
+const withService = Effect.fn("withService")(
+  <A, E, R>(
+    use: (
+      service: CrossProviderAgentMcpService.CrossProviderAgentMcpService["Service"],
+      scope: McpInvocationContext.McpInvocationScope,
+    ) => Effect.Effect<A, E, R>,
+  ) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* CrossProviderAgentMcpService.CrossProviderAgentMcpService;
+      return yield* use(service, scope);
+    }),
+);
 
 // fork: catalog, wait and result change nothing (they never acknowledge a task's delivery);
 // spawn acts as the calling thread; follow-up and interrupt write to the child thread.

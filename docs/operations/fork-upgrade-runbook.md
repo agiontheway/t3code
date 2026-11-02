@@ -78,3 +78,20 @@ existing copy and does not pick up work done in 0.0.45 since the first upgrade.
 To import again from `state.sqlite`, quit T3 Code and delete `statev2.sqlite` together with its
 `statev2.sqlite-wal` and `statev2.sqlite-shm` files, then start 0.1.0. This discards everything
 that was done in 0.1.0.
+
+## 0.1.6
+
+Merge upstream with its linked-environment delegation, completion acknowledgements, secret requests,
+and settings layout intact. Remote `delegate_task` deliberately bypasses the fork's local admission
+policy; `agent_*` stays local. Native waits also stop on approvals, while `agent_wait` retains its
+question-or-terminal predicate and timeout clamps.
+
+The sidebar row now lives in `sidebar/SidebarThreadRow.tsx`; its usage line moves with it. Keep
+Agents and Signal under Integrations alongside the new Browser, Devices, Labs and Connections pages.
+Projection usage stays on the SQL store after upstream removed the memory layer. Credential reuse
+must compare both upstream's subagent bit and all fork capability bits. Upstream now inlines task
+results; alias-owned wakes must include output only through the fork's capped payload.
+
+Use upstream's patched-dependency pins and regenerate the lockfile. Resolve catalog-backed patched
+packages to exact override versions for lockfile-free installer staging. The fork installer workflow
+and Connect-required build gate remain in place.

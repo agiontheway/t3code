@@ -43,7 +43,7 @@ export class HeartbeatReactor extends Context.Service<
 export const make = Effect.gen(function* () {
   const scheduler = yield* HeartbeatScheduler;
 
-  const start: HeartbeatReactor["Service"]["start"] = (onReservation) =>
+  const start: HeartbeatReactor["Service"]["start"] = Effect.fn("start")((onReservation) =>
     Effect.gen(function* () {
       const changes = yield* scheduler.subscribeChanges;
       const reserved = yield* Effect.acquireRelease(
@@ -158,7 +158,8 @@ export const make = Effect.gen(function* () {
         drain: worker.drain,
         subscribeReserved: Effect.succeed(reservedSubscription),
       } satisfies HeartbeatReactorHandle;
-    });
+    }),
+  );
   return HeartbeatReactor.of({ start });
 });
 
