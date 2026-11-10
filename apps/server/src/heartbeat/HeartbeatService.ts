@@ -24,7 +24,7 @@ import {
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Cron from "effect/Cron";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom"; // fork: Effect split Crypto services.
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -214,7 +214,7 @@ const nextRecurringSchedule = (cached: CachedCronJob, nowMs: number) => {
 /** @public Constructs the contract service plus scheduler-facing hooks. */
 export const make = Effect.gen(function* () {
   const repository = yield* HeartbeatRepository;
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* SecureRandom.SecureRandom;
   const changes = yield* PubSub.sliding<void>(1);
   const lock = yield* Semaphore.make(1);
   const activeThreads = new Set<string>();
@@ -244,12 +244,12 @@ export const make = Effect.gen(function* () {
   });
 
   const nextPublicId = Effect.fn("HeartbeatService.nextPublicId")(function* () {
-    const uuid = yield* crypto.randomUUIDv4();
+    const uuid = yield* crypto.uuidV4();
     return HeartbeatJobId.make(uuid.replaceAll("-", "").slice(0, 8));
   });
 
   const nextOccurrenceId = Effect.fn("HeartbeatService.nextOccurrenceId")(function* () {
-    return HeartbeatOccurrenceId.make(yield* crypto.randomUUIDv4());
+    return HeartbeatOccurrenceId.make(yield* crypto.uuidV4());
   });
 
   const nextAvailableRelativeId = Effect.fn("HeartbeatService.nextAvailableRelativeId")(function* (

@@ -50,7 +50,11 @@ function makeHarness(environmentIds: ReadonlyArray<EnvironmentId> = [environment
     registry: AtomRegistry.make(),
     snapshotAtom,
     catalogValueAtom,
-    threads: createEnvironmentThreadShellAtoms({ catalogValueAtom, snapshotAtom }),
+    threads: createEnvironmentThreadShellAtoms({
+      catalogValueAtom,
+      snapshotAtom,
+      hiddenThreadTagsAtom: () => Atom.make(null),
+    }),
   };
 }
 
@@ -183,7 +187,7 @@ describe("v2 thread shell lists", () => {
     const disposeNavigation = registry.mount(threads.navigationThreadShellsAtom);
     const withRequest = (
       kind: "user_input" | "command",
-      options: { readonly blocking?: boolean; readonly settled?: boolean } = {},
+      options: { readonly blocking?: boolean } = {},
     ) =>
       registry.set(snapshotAtom(environmentId), {
         ...v2ShellSnapshot,
@@ -191,7 +195,6 @@ describe("v2 thread shell lists", () => {
           root,
           {
             ...sideChat,
-            ...(options.settled ? { status: "completed" as const, activityRunStatus: null } : {}),
             pendingRuntimeRequest: {
               ...request,
               kind,
@@ -208,11 +211,7 @@ describe("v2 thread shell lists", () => {
       root.id,
     ]);
 
-    // An async question waits while the side chat works, like its own row's indicator.
     withRequest("user_input", { blocking: false });
-    expect(registry.get(parent)?.pendingSubagentRequest).toBeNull();
-    expect(registry.get(inputs)).toEqual([]);
-    withRequest("user_input", { blocking: false, settled: true });
     expect(registry.get(parent)?.pendingSubagentRequest).toBe("user_input");
 
     withRequest("command");

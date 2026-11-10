@@ -61,6 +61,10 @@ const assertCurrentSchema = Effect.gen(function* () {
     { migration_id: 74, name: "ExcludeAttachmentPlaceholdersFromSearch" },
     { migration_id: 75, name: "SubagentDeliveryState" },
     { migration_id: 76, name: "ProjectionProjectsPinArchive" },
+    { migration_id: 77, name: "RepairBooleanSettledOverride" },
+    { migration_id: 78, name: "DropOrchestrationEventCorrelationIndex" },
+    { migration_id: 79, name: "DelegatedRecoveryIndexes" },
+    { migration_id: 80, name: "ScheduledTaskThreadMode" },
   ]);
   assert.deepStrictEqual(
     yield* sql`SELECT migration_id, name FROM t3_fork_migrations ORDER BY migration_id`,

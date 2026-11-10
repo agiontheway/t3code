@@ -7,7 +7,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom"; // fork: Effect split Crypto services.
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -27,18 +27,15 @@ const THREAD_ID = ThreadId.make("heartbeat-reactor-thread");
 
 const crypto = (() => {
   let counter = 0;
-  const base = Crypto.make({
-    randomBytes: (size) => new Uint8Array(size).fill(1),
-    digest: (_algorithm, data) => Effect.succeed(data),
-  });
+  const base = SecureRandom.make((size) => new Uint8Array(size).fill(1));
   return {
     ...base,
-    randomUUIDv4: (() =>
+    uuidV4: (() =>
       Effect.sync(() => {
         counter += 1;
         return `${counter.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
-      })) as Crypto.Crypto["randomUUIDv4"],
-  } satisfies Crypto.Crypto;
+      })) as SecureRandom.SecureRandom["Service"]["uuidV4"],
+  } satisfies SecureRandom.SecureRandom["Service"];
 })();
 
 it.effect("reserves due work as pending without pretending admission or delivery succeeded", () =>
@@ -60,7 +57,7 @@ it.effect("reserves due work as pending without pretending admission or delivery
       const repository = yield* HeartbeatRepository.make;
       const service = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
       );
       const job = yield* service.create(THREAD_ID, {
         cron: HeartbeatCronExpression.make("1 10 * * *"),
@@ -113,7 +110,7 @@ it.effect("reconciles a wall-clock jump within one second without rescanning sto
       } satisfies HeartbeatRepository.HeartbeatRepository["Service"];
       const service = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, observedRepository),
-        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(SecureRandom.SecureRandom, crypto),
       );
       const job = yield* service.create(THREAD_ID, {
         cron: HeartbeatCronExpression.make("1 10 * * *"),

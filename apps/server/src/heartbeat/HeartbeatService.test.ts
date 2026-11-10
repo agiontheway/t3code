@@ -8,7 +8,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom"; // fork: Effect split Crypto services.
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Ref from "effect/Ref";
@@ -25,18 +25,15 @@ const START_MS = Date.parse("2026-09-17T10:00:10.000Z");
 
 const makeCrypto = () => {
   let counter = 0;
-  const base = Crypto.make({
-    randomBytes: (size) => new Uint8Array(size).fill(1),
-    digest: (_algorithm, data) => Effect.succeed(data),
-  });
+  const base = SecureRandom.make((size) => new Uint8Array(size).fill(1));
   return {
     ...base,
-    randomUUIDv4: (() =>
+    uuidV4: (() =>
       Effect.sync(() => {
         counter += 1;
         return `${counter.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
-      })) as Crypto.Crypto["randomUUIDv4"],
-  } satisfies Crypto.Crypto;
+      })) as SecureRandom.SecureRandom["Service"]["uuidV4"],
+  } satisfies SecureRandom.SecureRandom["Service"];
 };
 
 const seedThread = Effect.gen(function* () {
@@ -94,7 +91,7 @@ const withService = <A, E>(
     service: HeartbeatService.HeartbeatServiceImplementation,
     repository: HeartbeatRepository.HeartbeatRepository["Service"],
   ) => Effect.Effect<A, E, SqlClient.SqlClient>,
-  crypto: Crypto.Crypto = makeCrypto(),
+  crypto: SecureRandom.SecureRandom["Service"] = makeCrypto(),
 ) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(START_MS);
@@ -103,7 +100,7 @@ const withService = <A, E>(
     const repository = yield* HeartbeatRepository.make;
     const service = yield* HeartbeatService.make.pipe(
       Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-      Effect.provideService(Crypto.Crypto, crypto),
+      Effect.provideService(SecureRandom.SecureRandom, crypto),
     );
     return yield* use(service, repository);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
@@ -257,11 +254,11 @@ it.effect("keeps cron and relative display IDs unambiguous across deterministic 
   const base = makeCrypto();
   const collisionCrypto = {
     ...base,
-    randomUUIDv4: (() =>
+    uuidV4: (() =>
       Effect.sync(
         () => `${ids[Math.min(index++, ids.length - 1)]}-0000-4000-8000-000000000000`,
-      )) as Crypto.Crypto["randomUUIDv4"],
-  } satisfies Crypto.Crypto;
+      )) as SecureRandom.SecureRandom["Service"]["uuidV4"],
+  } satisfies SecureRandom.SecureRandom["Service"];
   return withService(
     (service) =>
       Effect.gen(function* () {
@@ -284,9 +281,11 @@ it.effect("preserves the prior relative arm when replacement ID allocation fails
   const base = makeCrypto();
   const fixedCrypto = {
     ...base,
-    randomUUIDv4: (() =>
-      Effect.succeed("deadbeef-0000-4000-8000-000000000000")) as Crypto.Crypto["randomUUIDv4"],
-  } satisfies Crypto.Crypto;
+    uuidV4: (() =>
+      Effect.succeed(
+        "deadbeef-0000-4000-8000-000000000000",
+      )) as SecureRandom.SecureRandom["Service"]["uuidV4"],
+  } satisfies SecureRandom.SecureRandom["Service"];
   return withService(
     (service) =>
       Effect.gen(function* () {
@@ -499,7 +498,7 @@ it.effect(
 
       const service = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-        Effect.provideService(Crypto.Crypto, makeCrypto()),
+        Effect.provideService(SecureRandom.SecureRandom, makeCrypto()),
       );
       const jobs = (yield* service.list(THREAD_ID)).jobs;
       assert.strictEqual(jobs.length, 1);
@@ -543,7 +542,7 @@ it.effect("prunes a pre-stop cron on restart while retaining and running a post-
       // construct a fresh scheduler over the same durable database.
       const restored = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-        Effect.provideService(Crypto.Crypto, makeCrypto()),
+        Effect.provideService(SecureRandom.SecureRandom, makeCrypto()),
       );
       const restoredJobs = (yield* restored.list(THREAD_ID)).jobs;
       assert.deepStrictEqual(
@@ -589,7 +588,7 @@ it.effect("prunes a cron armed at the head an event-less stop recorded on restar
 
       const restored = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-        Effect.provideService(Crypto.Crypto, makeCrypto()),
+        Effect.provideService(SecureRandom.SecureRandom, makeCrypto()),
       );
       assert.deepStrictEqual((yield* restored.list(THREAD_ID)).jobs, []);
       yield* restored.activateOnAcceptedTurn(THREAD_ID);
@@ -610,14 +609,14 @@ it.effect("does not revive an archived cron after restore and later unarchive", 
 
       const restoredArchived = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-        Effect.provideService(Crypto.Crypto, makeCrypto()),
+        Effect.provideService(SecureRandom.SecureRandom, makeCrypto()),
       );
       assert.deepStrictEqual((yield* restoredArchived.list(THREAD_ID)).jobs, []);
 
       yield* acceptThreadCommand("evt-crash-unarchive", "thread.unarchive", "thread.unarchived");
       const restoredUnarchived = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-        Effect.provideService(Crypto.Crypto, makeCrypto()),
+        Effect.provideService(SecureRandom.SecureRandom, makeCrypto()),
       );
       yield* restoredUnarchived.activateOnAcceptedTurn(THREAD_ID);
       assert.deepStrictEqual((yield* restoredUnarchived.list(THREAD_ID)).jobs, []);
@@ -631,7 +630,7 @@ it.effect("does not revive an archived cron after restore and later unarchive", 
       yield* acceptThreadCommand("evt-crash-delete", "thread.delete", "thread.deleted");
       const restoredDeleted = yield* HeartbeatService.make.pipe(
         Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-        Effect.provideService(Crypto.Crypto, makeCrypto()),
+        Effect.provideService(SecureRandom.SecureRandom, makeCrypto()),
       );
       assert.deepStrictEqual((yield* restoredDeleted.list(THREAD_ID)).jobs, []);
       yield* restoredDeleted.activateOnAcceptedTurn(THREAD_ID);
@@ -678,7 +677,7 @@ it.effect("terminalizes an unresolved cron occurrence on restart without resendi
 
     const restored = yield* HeartbeatService.make.pipe(
       Effect.provideService(HeartbeatRepository.HeartbeatRepository, repository),
-      Effect.provideService(Crypto.Crypto, makeCrypto()),
+      Effect.provideService(SecureRandom.SecureRandom, makeCrypto()),
     );
 
     assert.strictEqual(yield* repository.occurrenceStatus(occurrenceId), "expired");
