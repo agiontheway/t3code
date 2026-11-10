@@ -180,11 +180,11 @@ const cronJobView = (cached: CachedCronJob, active: boolean): HeartbeatCronJob =
   restartPolicy: "restore-on-resume",
 });
 
-const relativeJobView = (slot: RelativeSlot, active: boolean): HeartbeatRelativeJob => ({
+const relativeJobView = (slot: RelativeSlot): HeartbeatRelativeJob => ({
   id: slot.id,
   kind: "relative",
   prompt: slot.prompt,
-  status: slot.pendingOccurrenceId === undefined ? (active ? "active" : "dormant") : "pending",
+  status: slot.pendingOccurrenceId === undefined ? "active" : "pending",
   dueAt: iso(slot.dueAtMs),
   ...(slot.reason === undefined ? {} : { reason: slot.reason }),
   noop: slot.noop,
@@ -451,10 +451,7 @@ export const make = Effect.gen(function* () {
           .map((cached) => cronJobView(cached, active));
         const relative = relativeSlots.get(threadId);
         return {
-          jobs: [
-            ...persisted,
-            ...(relative === undefined ? [] : [relativeJobView(relative, active)]),
-          ],
+          jobs: [...persisted, ...(relative === undefined ? [] : [relativeJobView(relative)])],
         };
       }),
     ).pipe(Effect.mapError(operationError("list")));
@@ -511,7 +508,7 @@ export const make = Effect.gen(function* () {
         yield* publishChange;
         return {
           action: "armed",
-          job: relativeJobView(slot, activeThreads.has(threadId)),
+          job: relativeJobView(slot),
           replaced: prior !== undefined,
         } as const;
       }),
@@ -678,7 +675,7 @@ export const make = Effect.gen(function* () {
         )
         .map((cached) => cached.job),
       relativeSlots: [...relativeSlots.values()].filter(
-        (slot) => activeThreads.has(slot.threadId) && slot.pendingOccurrenceId === undefined,
+        (slot) => slot.pendingOccurrenceId === undefined,
       ),
       hasPendingReservations: occurrences.size > 0,
     })),
@@ -739,12 +736,7 @@ export const make = Effect.gen(function* () {
         }
 
         const dueRelative = [...relativeSlots.values()]
-          .filter(
-            (slot) =>
-              activeThreads.has(slot.threadId) &&
-              slot.pendingOccurrenceId === undefined &&
-              slot.dueAtMs <= nowMs,
-          )
+          .filter((slot) => slot.pendingOccurrenceId === undefined && slot.dueAtMs <= nowMs)
           .sort(
             (left, right) =>
               left.dueAtMs - right.dueAtMs ||

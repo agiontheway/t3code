@@ -1,22 +1,35 @@
 import {
+  CommandId,
+  EventId,
   HeartbeatCronExpression,
   HeartbeatDelaySeconds,
   HeartbeatJobId,
   HeartbeatOccurrenceId,
   HeartbeatPrompt,
   HeartbeatTimeZone,
+  MessageId,
+  type OrchestrationV2StoredEvent,
   ThreadId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as SecureRandom from "effect/crypto/SecureRandom"; // fork: Effect split Crypto services.
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
+import { EventSinkV2 } from "../orchestration-v2/EventSink.ts";
+import { DelegationGrants } from "../orchestration-v2/fork/DelegationGrants.ts";
+import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import { runMigrations } from "../persistence/Migrations.ts";
+import { OrchestrationCommandReceiptRepository } from "../persistence/OrchestrationCommandReceipts.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as HeartbeatAdmissionReactor from "./HeartbeatAdmissionReactor.ts";
+import { HeartbeatReactor } from "./HeartbeatReactor.ts";
 import * as HeartbeatRepository from "./HeartbeatRepository.ts";
 import * as HeartbeatService from "./HeartbeatService.ts";
 
@@ -111,6 +124,86 @@ const recurringInput = {
   recurring: true,
   timezone: HeartbeatTimeZone.make("UTC"),
 } as const;
+
+const reactorFor = (
+  service: HeartbeatService.HeartbeatServiceImplementation,
+  repository: HeartbeatRepository.HeartbeatRepository["Service"],
+) =>
+  HeartbeatAdmissionReactor.make.pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(HeartbeatService.HeartbeatScheduler, service),
+        Layer.succeed(HeartbeatRepository.HeartbeatRepository, repository),
+        Layer.mock(HeartbeatReactor)({}),
+        Layer.mock(EventSinkV2)({}),
+        Layer.mock(ThreadManagementService)({}),
+        Layer.mock(DelegationGrants)({}),
+        Layer.mock(OrchestrationCommandReceiptRepository)({}),
+        ServerSettings.layerTest(),
+      ),
+    ),
+  );
+
+const messageEvent = (createdBy: "user" | "agent", id: string): OrchestrationV2StoredEvent => {
+  const now = DateTime.makeUnsafe(START_MS);
+  return {
+    sequence: 1,
+    commandId: CommandId.make(`cmd:${id}`),
+    event: {
+      id: EventId.make(`event:${id}`),
+      threadId: THREAD_ID,
+      occurredAt: now,
+      type: "message.updated",
+      payload: {
+        id: MessageId.make(id),
+        threadId: THREAD_ID,
+        runId: null,
+        nodeId: null,
+        role: "user",
+        text: "authorized work",
+        attachments: [],
+        streaming: false,
+        createdAt: now,
+        updatedAt: now,
+        createdBy,
+        creationSource: "server",
+      },
+    },
+  };
+};
+
+it.effect.each(["kickoff", "agent-follow-up"])(
+  "fires a relative wakeup after an agent-authored %s without a user turn",
+  (kind) =>
+    withService((service, repository) =>
+      Effect.gen(function* () {
+        const reactor = yield* reactorFor(service, repository);
+        yield* reactor.handleStoredEvent(messageEvent("agent", kind));
+        const armed = yield* service.wakeup(THREAD_ID, {
+          type: "arm",
+          delaySeconds: HeartbeatDelaySeconds.make(600),
+          prompt: HeartbeatPrompt.make("continue"),
+          noop: false,
+        });
+        if (armed.action !== "armed") assert.fail("expected relative wakeup to arm");
+        const listed = yield* service.list(THREAD_ID);
+        const snapshot = yield* service.schedulerSnapshot;
+
+        yield* TestClock.adjust("660 seconds");
+        const due = yield* service.reserveDue(START_MS + 660_000);
+        assert.strictEqual(due.length, 1);
+        assert.strictEqual(due[0]?.publicId, armed.job.id);
+        assert.strictEqual(armed.job.status, "active");
+        assert.strictEqual(listed.jobs[0]?.status, "active");
+        assert.deepStrictEqual(
+          snapshot.relativeSlots.map((slot) => slot.id),
+          [armed.job.id],
+        );
+        assert.strictEqual((yield* service.list(THREAD_ID)).jobs[0]?.status, "pending");
+        assert.deepStrictEqual(yield* service.reserveDue(START_MS + 660_000), []);
+      }),
+    ),
+);
 
 it.effect("enforces the per-thread cron cap with collision-checked public IDs", () =>
   withService((service) =>
@@ -551,7 +644,12 @@ it.effect("prunes a pre-stop cron on restart while retaining and running a post-
       );
       assert.strictEqual(restoredJobs[0]?.status, "dormant");
 
-      yield* restored.activateOnAcceptedTurn(THREAD_ID);
+      const reactor = yield* reactorFor(restored, repository);
+      yield* reactor.handleStoredEvent(messageEvent("agent", "restored-agent-kickoff"));
+      assert.strictEqual((yield* restored.list(THREAD_ID)).jobs[0]?.status, "dormant");
+      assert.deepStrictEqual(yield* restored.reserveDue(Date.parse(survivor.nextFireAt)), []);
+      yield* reactor.handleStoredEvent(messageEvent("user", "resume-restored-cron"));
+      assert.strictEqual((yield* restored.list(THREAD_ID)).jobs[0]?.status, "active");
       const due = yield* restored.reserveDue(Date.parse(survivor.nextFireAt));
       assert.deepStrictEqual(
         due.map((occurrence) => occurrence.publicId),
