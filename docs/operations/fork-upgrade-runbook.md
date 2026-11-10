@@ -95,3 +95,21 @@ results; alias-owned wakes must include output only through the fork's capped pa
 Use upstream's patched-dependency pins and regenerate the lockfile. Resolve catalog-backed patched
 packages to exact override versions for lockfile-free installer staging. The fork installer workflow
 and Connect-required build gate remain in place.
+
+## 0.1.8
+
+Keep upstream's late-result idle-parent wakes and sibling wakeups after an interrupted completion
+delivery. Completion delivery still uses upstream's mailbox path; heartbeat and Signal
+`start_if_idle` admission remains under the same thread dispatch lock. A queued or active completion
+wake makes those deliveries retry as busy, without recording a rejection. A heartbeat admitted
+first leaves the completion result to upstream's queue and acknowledgement rules. Stop and
+interrupt fences remain in force for fork wakeups. Alias-owned completion text and output caps
+continue to wrap upstream's delivery inputs.
+
+Preserve both upstream and fork credential capability checks, including the subagent bit. Codex's
+direct-only wait registration coexists with the fork's disabled-tool list. Use Effect's split
+SecureRandom service, the in-process MCP middleware and the projection replay test helper. Keep
+Agents, Signal and usage displays on upstream's layouts; keep sidebar usage aggregates out of
+agent-awareness queries. Pin every patched dependency exactly
+before regenerating the lockfile. Stamp the four release manifests as 0.1.8 separately from the
+merge: the upstream tag still carries 0.1.7.

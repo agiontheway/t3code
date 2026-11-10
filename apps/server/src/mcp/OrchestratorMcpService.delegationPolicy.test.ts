@@ -1,4 +1,5 @@
 import { RemoteDelegation } from "../peer/RemoteDelegation.ts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -138,6 +139,7 @@ const delegateWithPolicy = (input: {
     } as unknown as OrchestrationV2ThreadProjection;
     const layerDependencies = Layer.mergeAll(
       NodeServices.layer,
+      NodeCrypto.layer,
       Layer.mock(ThreadManagementService.ThreadManagementService)({
         hasReceipt: () => Effect.succeed(false),
         assertProviderInstanceEnabled: () => Effect.void,

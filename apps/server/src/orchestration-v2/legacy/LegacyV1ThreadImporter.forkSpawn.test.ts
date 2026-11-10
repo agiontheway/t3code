@@ -10,7 +10,7 @@ import * as EventSink from "../EventSink.ts";
 import * as EventStore from "../EventStore.ts";
 import * as DelegationGrants from "../fork/DelegationGrants.ts";
 import * as LegacyV1ThreadImporter from "./LegacyV1ThreadImporter.ts";
-import * as ProjectionMaintenance from "../ProjectionMaintenance.ts";
+import * as ProjectionReplay from "../testkit/ProjectionReplay.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 
 const layerDatabase = SqlitePersistence.layerMemory;
@@ -26,7 +26,7 @@ const layerTest = Layer.mergeAll(
   LegacyV1ThreadImporter.layer.pipe(
     Layer.provide(Layer.mergeAll(layerStoresProvided, layerEventSinkProvided)),
   ),
-  ProjectionMaintenance.layer.pipe(Layer.provide(layerStoresProvided)),
+  ProjectionReplay.layer.pipe(Layer.provide(layerStoresProvided)),
   DelegationGrants.layer.pipe(Layer.provide(layerDatabase)),
 );
 
@@ -86,7 +86,7 @@ it.layer(layerTest)("LegacyV1ThreadImporter 0.0.45 spawn rows", (it) => {
     Effect.gen(function* () {
       const importer = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
-      const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
+      const maintenance = yield* ProjectionReplay.ProjectionReplay;
       const grants = yield* DelegationGrants.DelegationGrants;
       const projectId = "project:legacy-spawn-chain";
       const rootId = ThreadId.make("thread:legacy-spawn-root");

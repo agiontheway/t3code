@@ -1,4 +1,5 @@
 import { RemoteDelegation } from "../../../peer/RemoteDelegation.ts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -483,7 +484,7 @@ const makeLayer = (input: {
     OrchestratorMcpService.layer.pipe(Layer.provide(Layer.mock(RemoteDelegation)({}))),
   ).pipe(
     Layer.provide(Layer.mock(RemoteDelegation)({})),
-    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
     Layer.provideMerge(layerOrchestration),
     Layer.provideMerge(DelegationPolicy.layer.pipe(Layer.provideMerge(layerGrants))),
     Layer.provide(layerRegistry),
@@ -494,7 +495,7 @@ const makeLayer = (input: {
     Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
     Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
     Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
-    Layer.provide(NodeServices.layer),
+    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 };
 
@@ -881,11 +882,11 @@ describe("cross-provider agent toolkit", () => {
         const tooMany = yield* Effect.flip(
           callTool(root, "agent_wait", { childIds: Array.from({ length: 33 }, () => "x") }),
         );
-        assert.strictEqual(tooMany._tag, "InvalidParams");
+        assert.instanceOf(tooMany, McpSchema.InvalidParams);
         const tooLong = yield* Effect.flip(
           callTool(root, "agent_wait", { childIds: [], timeoutSeconds: 3601 }),
         );
-        assert.strictEqual(tooLong._tag, "InvalidParams");
+        assert.instanceOf(tooLong, McpSchema.InvalidParams);
         assert.deepStrictEqual(
           (yield* waitFor(root, { childIds: [], timeoutSeconds: 3600 })).children,
           [],
@@ -1253,6 +1254,47 @@ describe("cross-provider agent toolkit", () => {
           assert.strictEqual(noEffort.error.model, "glm-5.3-flash");
         }),
       ),
+  );
+
+  it.live("explains delegate_task ids while accepting the owned childThreadId", () =>
+    withEnvironment({}, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const native = yield* OrchestratorMcpService.OrchestratorMcpService;
+        script.responses.set("Native work.", "native answer");
+        const delegated = yield* native.delegateTask(root, {
+          task: "Native work.",
+          target: { providerInstanceId: CODEX, model: "gpt-5.6-sol" },
+          mode: "async",
+        });
+        yield* awaitProjection(ROOT, (projection) =>
+          projection.subagents.some(
+            (task) => task.id === delegated.taskId && task.status === "completed",
+          ),
+        );
+        yield* native.taskStatus(root, delegated.taskId);
+        const byThread = succeeded<CrossProviderAgentResultOutput>(
+          yield* callTool(root, "agent_result", { childId: delegated.childThreadId }),
+        );
+        assert.strictEqual(byThread.output, "native answer");
+
+        const byTask = failedWith(
+          yield* callTool(root, "agent_result", { childId: delegated.taskId }),
+          "not_owner",
+        );
+        assert.strictEqual(byTask.error.childId, delegated.taskId);
+        for (const hint of [
+          "delegate_task",
+          "task_status",
+          "task_cancel",
+          "agent_spawn",
+          "childId",
+          "childThreadId",
+        ]) {
+          assert.include(byTask.error.message, hint);
+        }
+      }),
+    ),
   );
 
   it.live(

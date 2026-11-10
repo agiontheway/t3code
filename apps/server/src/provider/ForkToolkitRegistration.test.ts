@@ -1,5 +1,7 @@
 import { HeartbeatService } from "../heartbeat/HeartbeatService.ts";
 import { DelegationGrants } from "../orchestration-v2/fork/DelegationGrants.ts";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { AssetSigner } from "../assets/AssetSigner.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
@@ -41,6 +43,7 @@ import { ProviderRegistry } from "./ProviderRegistry.ts";
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Layer.mock(AssetSigner)({}),
   Layer.mock(DeviceService)({}),
   Layer.mock(DocumentText)({}),
   Layer.mock(GitVcsDriver)({}),
@@ -74,7 +77,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(ThreadManagementService)({}),
   Layer.mock(ThreadSearch)({}),
   Layer.mock(VcsStatusBroadcaster)({}),
-).pipe(Layer.provideMerge(NodeServices.layer));
+).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 // fork: production registration coverage moved from the deleted worktree suite.
 it.effect("registers the fork tools alongside native delegation", () =>
@@ -99,7 +102,7 @@ it.effect("registers the fork tools alongside native delegation", () =>
   }).pipe(
     Effect.provide(
       McpHttpServer.layerTools.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(toolHandlerServices),
       ),
     ),
