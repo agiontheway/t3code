@@ -1256,6 +1256,47 @@ describe("cross-provider agent toolkit", () => {
       ),
   );
 
+  it.live("explains delegate_task ids while accepting the owned childThreadId", () =>
+    withEnvironment({}, (script, cwd) =>
+      Effect.gen(function* () {
+        const root = yield* seedRoot(cwd);
+        const native = yield* OrchestratorMcpService.OrchestratorMcpService;
+        script.responses.set("Native work.", "native answer");
+        const delegated = yield* native.delegateTask(root, {
+          task: "Native work.",
+          target: { providerInstanceId: CODEX, model: "gpt-5.6-sol" },
+          mode: "async",
+        });
+        yield* awaitProjection(ROOT, (projection) =>
+          projection.subagents.some(
+            (task) => task.id === delegated.taskId && task.status === "completed",
+          ),
+        );
+        yield* native.taskStatus(root, delegated.taskId);
+        const byThread = succeeded<CrossProviderAgentResultOutput>(
+          yield* callTool(root, "agent_result", { childId: delegated.childThreadId }),
+        );
+        assert.strictEqual(byThread.output, "native answer");
+
+        const byTask = failedWith(
+          yield* callTool(root, "agent_result", { childId: delegated.taskId }),
+          "not_owner",
+        );
+        assert.strictEqual(byTask.error.childId, delegated.taskId);
+        for (const hint of [
+          "delegate_task",
+          "task_status",
+          "task_cancel",
+          "agent_spawn",
+          "childId",
+          "childThreadId",
+        ]) {
+          assert.include(byTask.error.message, hint);
+        }
+      }),
+    ),
+  );
+
   it.live(
     "ownership follows the spawn chain: ancestors may act, siblings and strangers may not",
     () =>

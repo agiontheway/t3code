@@ -223,7 +223,9 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const notOwner = fail({
           code: "not_owner",
-          message: "No child with that id is owned by this thread.",
+          message: rawChildId.startsWith("node:delegated-task:")
+            ? "delegate_task ids are read with task_status / task_cancel. agent_* tools take the childId from agent_spawn (or the childThreadId)."
+            : "No child with that id is owned by this thread.",
           childId: rawChildId,
         });
         if (!isThreadId(rawChildId)) return yield* notOwner;
