@@ -231,7 +231,7 @@ function scriptedAdapter(input: {
         ) =>
           Effect.gen(function* () {
             const at = yield* DateTime.now;
-            const text = turnInput.message.text;
+            const text = turnInput.message.text.replace(/^\[T3 Code: the agent[^\n]*\]\n\n/, "");
             const failed = text.startsWith(FAIL);
             yield* publish([
               providerTurn(turnInput, providerTurnId, failed ? "failed" : "completed", at),
@@ -334,7 +334,7 @@ function scriptedAdapter(input: {
               yield* publish([
                 providerTurn(turnInput, providerTurnId, "running", yield* DateTime.now),
               ]);
-              const text = turnInput.message.text;
+              const text = turnInput.message.text.replace(/^\[T3 Code: the agent[^\n]*\]\n\n/, "");
               if (text.startsWith(KEEP_RUNNING)) return;
               const gate = input.script.gates.get(text);
               if (gate === undefined) return yield* complete(turnInput, providerTurnId);
@@ -494,7 +494,11 @@ const makeLayer = (input: {
     Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
     Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
     Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-    Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+    Layer.provide(
+      Layer.mock(ProjectService.ProjectService)({
+        workspaceScanDirectory: (cwd) => Effect.succeed(cwd),
+      }),
+    ),
     Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 };
@@ -1514,7 +1518,7 @@ describe("automatic result delivery in the parent wake", () => {
         // Upstream now includes native results inline. Alias wakes retain the fork payload.
         assert.strictEqual(
           nativeWake.text,
-          `Delegated task ${delegated.taskId} [completed]:\nnative answer`,
+          `Delegated task ${delegated.taskId} in child thread ${delegated.childThreadId} [completed]:\nnative answer`,
         );
         // Reading the result natively consumes that wake.
         yield* native.taskStatus(root, delegated.taskId);

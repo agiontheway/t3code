@@ -14,7 +14,7 @@ import {
   CrossProviderAgentWaitOutput,
   OrchestratorMcpFailure,
 } from "@t3tools/contracts";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
 
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -60,7 +60,9 @@ const AgentSpawnTool = Tool.make("agent_spawn", {
 })
   .annotate(Tool.Title, "Spawn a cross-provider agent")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  // fork: spawning acts only as its local calling thread.
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const AgentWaitTool = Tool.make("agent_wait", {
   description: CROSS_PROVIDER_AGENT_TOOL_DESCRIPTIONS.agent_wait,

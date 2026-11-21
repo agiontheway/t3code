@@ -33,39 +33,12 @@ const assertCurrentSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const upstream =
     yield* sql`SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 50 ORDER BY migration_id`;
-  assert.deepStrictEqual(upstream, [
-    { migration_id: 50, name: "ProjectionThreadPullRequests" },
-    { migration_id: 51, name: "ProjectionThreadMessageContext" },
-    { migration_id: 52, name: "ProjectionThreadTitleState" },
-    { migration_id: 53, name: "PullRequestFilesViewed" },
-    { migration_id: 54, name: "ProjectionThreadsAutoSettleDisabledAt" },
-    { migration_id: 55, name: "OrchestrationV2" },
-    { migration_id: 56, name: "RemoveRedundantProjectionIndexes" },
-    { migration_id: 57, name: "ScheduledTaskWebhooks" },
-    { migration_id: 58, name: "WebhookRelayDeliveries" },
-    { migration_id: 59, name: "McpAppModelContext" },
-    { migration_id: 60, name: "ThreadSnapshotWindowIndexes" },
-    { migration_id: 61, name: "PullRequestReviewGuides" },
-    { migration_id: 62, name: "ThreadFailureLookupIndex" },
-    { migration_id: 63, name: "DropUnusedV1Projections" },
-    { migration_id: 64, name: "CanonicalizeThreadPullRequestLinks" },
-    { migration_id: 65, name: "CodexUsageNativeTurnIndex" },
-    { migration_id: 66, name: "RepairClientSettlementTimestamps" },
-    { migration_id: 67, name: "WebhookDedupe" },
-    { migration_id: 68, name: "ShellStopRequestIndex" },
-    { migration_id: 69, name: "ThreadMessageSearch" },
-    { migration_id: 70, name: "PeerLinks" },
-    { migration_id: 71, name: "PeerLinkFence" },
-    { migration_id: 72, name: "WaitingLinkRequestIndex" },
-    { migration_id: 73, name: "ActiveTurnItemIndexes" },
-    { migration_id: 74, name: "ExcludeAttachmentPlaceholdersFromSearch" },
-    { migration_id: 75, name: "SubagentDeliveryState" },
-    { migration_id: 76, name: "ProjectionProjectsPinArchive" },
-    { migration_id: 77, name: "RepairBooleanSettledOverride" },
-    { migration_id: 78, name: "DropOrchestrationEventCorrelationIndex" },
-    { migration_id: 79, name: "DelegatedRecoveryIndexes" },
-    { migration_id: 80, name: "ScheduledTaskThreadMode" },
-  ]);
+  assert.deepStrictEqual(
+    upstream,
+    migrationManifest
+      .filter(([id]) => id >= 50)
+      .map(([migration_id, name]) => ({ migration_id, name })),
+  );
   assert.deepStrictEqual(
     yield* sql`SELECT migration_id, name FROM t3_fork_migrations ORDER BY migration_id`,
     [

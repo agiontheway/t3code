@@ -45,59 +45,72 @@ const columnNames = Effect.fn("columnNames")((table: string) =>
  */
 export const repairLegacyForkMigration50 = Effect.fn("repairLegacyForkMigration50")(function* () {
   const sql = yield* SqlClient.SqlClient;
-  yield* sql.withTransaction(
-    Effect.gen(function* () {
-      const tables =
-        yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
-      if (tables.length === 0) return;
-      const recorded = yield* sql<{
-        readonly name: string;
-      }>`SELECT name FROM effect_sql_migrations WHERE migration_id = 50`;
-      const name = recorded[0]?.name;
-      if (name === undefined) {
-        const later =
-          yield* sql`SELECT migration_id FROM effect_sql_migrations WHERE migration_id > 50 LIMIT 1`;
-        if (later.length > 0) {
-          return yield* new Migrator.MigrationError({
-            kind: "BadState",
-            message: "Migration history after 50 is missing migration 50",
-          });
-        }
-        return;
+  yield* Effect.gen(function* () {
+    const tables =
+      yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'`;
+    if (tables.length === 0) return;
+    const recorded = yield* sql<{
+      readonly name: string;
+    }>`SELECT name FROM effect_sql_migrations WHERE migration_id = 50`;
+    const name = recorded[0]?.name;
+    if (name === undefined) {
+      const later =
+        yield* sql`SELECT migration_id FROM effect_sql_migrations WHERE migration_id > 50 LIMIT 1`;
+      if (later.length > 0) {
+        return yield* new Migrator.MigrationError({
+          kind: "BadState",
+          message: "Migration history after 50 is missing migration 50",
+        });
       }
-      if (name === "ProjectionThreadsSpawn") {
-        if (!(yield* columnNames("projection_threads")).has("spawn_json")) {
-          return yield* new Migrator.MigrationError({
-            kind: "BadState",
-            message: "Legacy fork migration 50 is recorded but spawn ownership schema is missing",
-          });
-        }
-        yield* Migration0050;
-        yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadPullRequests' WHERE migration_id = 50 AND name = 'ProjectionThreadsSpawn'`;
-        return;
+      return;
+    }
+    if (name === "ProjectionThreadsSpawn") {
+      if (!(yield* columnNames("projection_threads")).has("spawn_json")) {
+        return yield* new Migrator.MigrationError({
+          kind: "BadState",
+          message: "Legacy fork migration 50 is recorded but spawn ownership schema is missing",
+        });
       }
-      if (name === "ProjectionThreadPullRequests") {
-        const columns = yield* columnNames("projection_thread_pull_requests");
-        if (PULL_REQUEST_COLUMNS.some((column) => !columns.has(column))) {
-          return yield* new Migrator.MigrationError({
-            kind: "BadState",
-            message: "Migration 50 is recorded but the pull-request schema is incomplete",
-          });
-        }
-        return;
+      // fork: only the legacy repair needs a write transaction; current schemas can open read-only.
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* Migration0050;
+          yield* sql`UPDATE effect_sql_migrations SET name = 'ProjectionThreadPullRequests' WHERE migration_id = 50 AND name = 'ProjectionThreadsSpawn'`;
+        }),
+      );
+      return;
+    }
+    if (name === "ProjectionThreadPullRequests") {
+      const columns = yield* columnNames("projection_thread_pull_requests");
+      if (PULL_REQUEST_COLUMNS.some((column) => !columns.has(column))) {
+        return yield* new Migrator.MigrationError({
+          kind: "BadState",
+          message: "Migration 50 is recorded but the pull-request schema is incomplete",
+        });
       }
-      return yield* new Migrator.MigrationError({
-        kind: "BadState",
-        message: `Unrecognized migration 50: ${name}`,
-      });
-    }),
-  );
+      return;
+    }
+    return yield* new Migrator.MigrationError({
+      kind: "BadState",
+      message: `Unrecognized migration 50: ${name}`,
+    });
+  });
 });
 
 const runForkLedger = Migrator.make({});
 
 /** Fork migrations, keyed in `t3_fork_migrations`. Append only; never reuse an id. */
 export const runForkMigrations = Effect.fn("runForkMigrations")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  // fork: an up-to-date ledger must not acquire a write lock during a read-only recheck.
+  const tables =
+    yield* sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 't3_fork_migrations'`;
+  if (tables.length > 0) {
+    const [latest] = yield* sql<{
+      readonly id: number | null;
+    }>`SELECT MAX(migration_id) AS id FROM t3_fork_migrations`;
+    if ((latest?.id ?? 0) >= 5) return [];
+  }
   return yield* runForkLedger({
     table: "t3_fork_migrations",
     loader: Migrator.fromRecord({

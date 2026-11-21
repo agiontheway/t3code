@@ -1,3 +1,5 @@
+import { T, Var, useGT, msg } from "gt-react";
+import { m as resolveNow } from "../../i18n/messages";
 import { useEffect, useState, useRef } from "react";
 import {
   ThreadId,
@@ -38,7 +40,7 @@ import {
 } from "../ui/select";
 
 const request = createRuntimeCommand(connectionAtomRuntime, {
-  label: "Signal integration",
+  label: resolveNow(msg("Signal integration")),
   execute: signalRequest,
 });
 const blankRoute = (): SignalCommandRoute => ({
@@ -60,6 +62,7 @@ function CommandEditor({
   onChange: (route: SignalCommandRoute) => void;
   onRemove: () => void;
 }) {
+  const gt = useGT();
   const prepared = Option.getOrNull(usePreparedConnection(environmentId));
   const allThreads = useThreadShells();
   const [query, setQuery] = useState("");
@@ -81,25 +84,27 @@ function CommandEditor({
       if (result._tag === "Success") setSkills(result.value.skills ?? []);
       else
         setError(
-          "Cannot discover skills for this thread. Select a thread with supported skill discovery.",
+          gt(
+            "Cannot discover skills for this thread. Select a thread with supported skill discovery.",
+          ),
         );
     });
     return () => {
       cancelled = true;
     };
-  }, [prepared, route.threadId, run]);
+  }, [prepared, route.threadId, run, gt]);
   return (
     <div className="space-y-2 rounded border p-3">
       <Input
-        aria-label="Signal command"
+        aria-label={gt("Signal command")}
         placeholder="/command"
         value={route.command}
         maxLength={33}
         onChange={(event) => onChange({ ...route, command: event.target.value })}
       />
       <Input
-        aria-label="Signal command description"
-        placeholder="Description shown by /help"
+        aria-label={gt("Signal command description")}
+        placeholder={gt("Description shown by /help")}
         value={route.description ?? ""}
         maxLength={200}
         onChange={(event) => onChange({ ...route, description: event.target.value })}
@@ -121,23 +126,25 @@ function CommandEditor({
         }}
         autoHighlight
       >
-        <ComboboxTrigger aria-label="Signal target thread" render={<SelectButton />}>
-          {selectedThread?.title ?? "Select an existing thread"}
+        <ComboboxTrigger aria-label={gt("Signal target thread")} render={<SelectButton />}>
+          {selectedThread?.title ?? gt("Select an existing thread")}
         </ComboboxTrigger>
         <ComboboxPopup>
           <ComboboxSearchInput
-            aria-label="Search Signal threads"
-            placeholder="Search threads…"
+            aria-label={gt("Search Signal threads")}
+            placeholder={gt("Search threads…")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          <ComboboxEmpty>No matching threads.</ComboboxEmpty>
+          <ComboboxEmpty>
+            <T>No matching threads.</T>
+          </ComboboxEmpty>
           <ComboboxList>
             {threads.map((thread, index) => (
               <ComboboxItem key={thread.id} value={thread.id} index={index}>
                 <span className="min-w-0 truncate">{thread.title}</span>
                 <span className="ml-2 text-xs text-muted-foreground">
-                  {thread.settledAt === null ? "Active" : "Settled"}
+                  {thread.settledAt === null ? gt("Active") : gt("Settled")}
                 </span>
               </ComboboxItem>
             ))}
@@ -148,8 +155,8 @@ function CommandEditor({
         value={route.skill}
         onValueChange={(value) => onChange({ ...route, skill: value ?? "" })}
       >
-        <SelectTrigger aria-label="Signal skill">
-          <SelectValue placeholder="Select a discovered skill" />
+        <SelectTrigger aria-label={gt("Signal skill")}>
+          <SelectValue placeholder={gt("Select a discovered skill")} />
         </SelectTrigger>
         <SelectPopup>
           {skills.map((name) => (
@@ -160,24 +167,27 @@ function CommandEditor({
         </SelectPopup>
       </Select>
       <Input
-        aria-label="Signal skill arguments"
-        placeholder="Fixed skill arguments (e.g. owner/repo)"
+        aria-label={gt("Signal skill arguments")}
+        placeholder={gt("Fixed skill arguments (e.g. owner/repo)")}
         value={route.skillArguments ?? ""}
         maxLength={2000}
         onChange={(event) => onChange({ ...route, skillArguments: event.target.value })}
       />
       {error && <p role="alert">{error}</p>}
       {!error && route.threadId !== "unselected" && skills.length === 0 && (
-        <p>No supported skills found for this thread.</p>
+        <p>
+          <T>No supported skills found for this thread.</T>
+        </p>
       )}
       <Button variant="outline" onClick={onRemove}>
-        Remove command
+        <T>Remove command</T>
       </Button>
     </div>
   );
 }
 
 export function SignalSettings() {
+  const gt = useGT();
   const { environments } = useSettingsScope();
   const environment = environments.length === 1 ? environments[0] : null;
   return environment ? (
@@ -187,8 +197,10 @@ export function SignalSettings() {
       label={environment.label}
     />
   ) : (
-    <SettingsSection id="signal" title="Signal">
-      <p>Select exactly one machine in the settings header to connect Signal.</p>
+    <SettingsSection id="signal" title={gt("Signal")}>
+      <p>
+        <T>Select exactly one machine in the settings header to connect Signal.</T>
+      </p>
     </SettingsSection>
   );
 }
@@ -200,6 +212,7 @@ function SignalSettingsForm({
   environmentId: EnvironmentId;
   label: string;
 }) {
+  const gt = useGT();
   const session = useEnvironmentSessionState(environmentId);
   const canRead = session.data?.scopes?.includes(AuthAccessReadScope);
   const canWrite = session.data?.scopes?.includes(AuthAccessWriteScope) === true;
@@ -232,14 +245,18 @@ function SignalSettingsForm({
       } else
         setError(
           canRead === false
-            ? "This browser does not have administrator access (access:read) on this machine. Reconnect with an administrator pairing link and retry. Existing bot settings have not been changed."
-            : "Cannot load Signal settings. Check this environment connection and administrator access, then retry. Existing bot settings have not been changed.",
+            ? gt(
+                "This browser does not have administrator access (access:read) on this machine. Reconnect with an administrator pairing link and retry. Existing bot settings have not been changed.",
+              )
+            : gt(
+                "Cannot load Signal settings. Check this environment connection and administrator access, then retry. Existing bot settings have not been changed.",
+              ),
         );
     });
     return () => {
       cancelled = true;
     };
-  }, [prepared, run, loaded, retry, canRead]);
+  }, [prepared, run, loaded, retry, canRead, gt]);
   const save = async (revoke = false) => {
     if (!prepared || !loaded || !canWrite) return;
     const requestGeneration = ++generation.current;
@@ -258,28 +275,37 @@ function SignalSettingsForm({
       setToken(result.value.token ?? null);
     } else
       setError(
-        "Signal settings were not saved. Check command names (unique, not /help, /commands, /ping, /status or /pair), threads, skills and access permissions.",
+        gt(
+          "Signal settings were not saved. Check command names (unique, not /help, /commands, /ping, /status or /pair), threads, skills and access permissions.",
+        ),
       );
   };
   return (
-    <SettingsSection id="signal" title="Signal">
+    <SettingsSection id="signal" title={gt("Signal")}>
       <div className="space-y-3 px-4 py-3 text-sm">
         <>
           <p>
-            Machine: {label} <span className="text-muted-foreground">({environmentId})</span>
+            <T>
+              Machine: <Var name="machine">{label}</Var>
+            </T>{" "}
+            <span className="text-muted-foreground">({environmentId})</span>
           </p>
           <p>
-            Any member of the linked Signal group can use the commands configured here. Each command
-            invokes its selected skill in its selected thread on this machine. Busy threads wait
-            until idle.
+            <T>
+              Any member of the linked Signal group can use the commands configured here. Each
+              command invokes its selected skill in its selected thread on this machine. Busy
+              threads wait until idle.
+            </T>
           </p>
           {!loaded && (
             <div role="status">
               {loading ? (
-                <p>Loading Signal settings…</p>
+                <p>
+                  <T>Loading Signal settings…</T>
+                </p>
               ) : (
                 <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>
-                  Retry loading
+                  <T>Retry loading</T>
                 </Button>
               )}
             </div>
@@ -288,7 +314,9 @@ function SignalSettingsForm({
             <>
               {!canWrite && (
                 <p>
-                  Administrator write access (access:write) is required to change these settings.
+                  <T>
+                    Administrator write access (access:write) is required to change these settings.
+                  </T>
                 </p>
               )}
               <fieldset disabled={busy || !prepared || !canWrite} className="max-w-lg space-y-3">
@@ -310,13 +338,15 @@ function SignalSettingsForm({
                     setCommands((items) => [...items, { ...blankRoute(), command: "" }])
                   }
                 >
-                  Add command
+                  <T>Add command</T>
                 </Button>
               </fieldset>
               <p>
-                Pair the bot with one Signal group on the broker. After every save, copy the new
-                connection and command list to its local worker and broker route settings. /help and
-                /commands list available commands.
+                <T>
+                  Pair the bot with one Signal group on the broker. After every save, copy the new
+                  connection and command list to its local worker and broker route settings. /help
+                  and /commands list available commands.
+                </T>
               </p>
               <div className="flex gap-2">
                 <Button
@@ -329,26 +359,30 @@ function SignalSettingsForm({
                   }
                   onClick={() => void save()}
                 >
-                  Save / rotate credential
+                  <T>Save / rotate credential</T>
                 </Button>
                 <Button
                   variant="outline"
                   disabled={busy || !prepared || !canWrite || !binding?.enabled}
                   onClick={() => void save(true)}
                 >
-                  Disable and revoke
+                  <T>Disable and revoke</T>
                 </Button>
               </div>
               {binding && (
                 <p>
-                  {binding.enabled ? "Enabled" : "Disabled"}: {binding.connectionId};{" "}
-                  {binding.commands.length} commands. Broker synchronization is configured
-                  separately.
+                  {binding.enabled ? gt("Enabled") : gt("Disabled")}: {binding.connectionId};{" "}
+                  <T>
+                    <Var name="count">{binding.commands.length}</Var> commands. Broker
+                    synchronization is configured separately.
+                  </T>
                 </p>
               )}
               {token && binding && (
                 <div className="space-y-2">
-                  <p>Copy this configuration. The credential is shown only once.</p>
+                  <p>
+                    <T>Copy this configuration. The credential is shown only once.</T>
+                  </p>
                   <pre className="overflow-auto whitespace-pre-wrap break-all rounded border p-3 text-xs">
                     {JSON.stringify(
                       {

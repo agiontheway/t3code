@@ -1,3 +1,4 @@
+import { GTProvider, initializeGT } from "gt-react";
 // fork: exercise the real sidebar row, tooltip and shell-to-row usage wiring.
 import { act, cloneElement, type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
@@ -95,7 +96,7 @@ const rowProps: ComponentProps<typeof SidebarThreadRow> = {
   wokeAt: null,
   isActive: false,
   isRouteThread: false,
-  openPullRequestsInRightPanel: false,
+  readOpensPullRequestsInRightPanel: () => false,
   jumpLabel: null,
   currentEnvironmentId: thread.environmentId,
   environmentLabel: "Environment",
@@ -137,14 +138,16 @@ it.each(["slim", "card"] as const)(
       },
     };
     await act(async () => {
-      renderer = create(<SidebarThreadRow {...rowProps} variant={variant} thread={withUsage} />);
+      renderer = create(
+        withI18n(<SidebarThreadRow {...rowProps} variant={variant} thread={withUsage} />),
+      );
     });
     expect(renderer.root.findAllByProps({ role: "tooltip" })).toHaveLength(0);
 
     state.showTooltips = true;
     await act(async () =>
       renderer.update(
-        <SidebarThreadRow {...rowProps} variant={variant} thread={{ ...withUsage }} />,
+        withI18n(<SidebarThreadRow {...rowProps} variant={variant} thread={{ ...withUsage }} />),
       ),
     );
     const card = renderer.root.findByProps({ role: "tooltip" });
@@ -159,11 +162,22 @@ it.each(["slim", "card"] as const)(
     ).toBe(true);
 
     await act(async () =>
-      renderer.update(<SidebarThreadRow {...rowProps} variant={variant} thread={{ ...thread }} />),
+      renderer.update(
+        withI18n(<SidebarThreadRow {...rowProps} variant={variant} thread={{ ...thread }} />),
+      ),
     );
     const freshCard = renderer.root.findByProps({ role: "tooltip" });
     expect(text(freshCard)).toContain("Usage thread");
     expect(text(freshCard)).not.toContain(" ctx · ");
     expect(text(freshCard)).not.toContain(" tok · ");
   },
+);
+
+// fork: these components now use upstream's translation hooks.
+initializeGT({ defaultLocale: "en", locales: ["en"] });
+
+const withI18n = (children: React.ReactNode) => (
+  <GTProvider locale="en" translations={{}}>
+    {children}
+  </GTProvider>
 );

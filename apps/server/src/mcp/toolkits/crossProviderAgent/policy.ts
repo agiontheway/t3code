@@ -71,6 +71,7 @@ export function childStateFromTaskStatus(status: OrchestratorMcpDelegatedTaskSta
 } {
   switch (status) {
     case "queued":
+    case "starting":
     case "running":
     case "waiting":
       return { settled: false, state: "running" };
