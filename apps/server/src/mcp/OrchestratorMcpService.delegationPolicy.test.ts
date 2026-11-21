@@ -186,7 +186,9 @@ const delegateWithPolicy = (input: {
             } as unknown as ProviderAdapter.ProviderAdapterV2["Service"]),
         }),
       ),
-      Layer.mock(ProjectService.ProjectService)({}),
+      Layer.mock(ProjectService.ProjectService)({
+        getById: () => Effect.succeedSome({ workspaceRoot: "/workspace" } as never),
+      }),
       Layer.mock(SecretRequests.SecretRequests)({}),
       Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),

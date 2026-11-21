@@ -431,10 +431,9 @@ it.effect("start_if_idle and reserved message ids are refused from non-server or
         creationSource: "server" as const,
       },
     ]) {
-      const intakeError = yield* ThreadMessageIntake.dispatchCommand(command).pipe(
-        Effect.provide(layerIntake),
-        Effect.flip,
-      );
+      const intakeError = yield* ThreadMessageIntake.dispatchCommand(command, {
+        managesProviders: true,
+      }).pipe(Effect.provide(layerIntake), Effect.flip);
       assert.equal(intakeError._tag, "OrchestratorDispatchError");
       assert.isNull(yield* receiptFor(command.commandId));
     }

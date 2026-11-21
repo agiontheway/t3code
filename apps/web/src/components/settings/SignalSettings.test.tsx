@@ -1,5 +1,6 @@
+import { GTProvider, initializeGT } from "gt-react";
 import { act, type ReactNode } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import * as Option from "effect/Option";
 
@@ -64,6 +65,10 @@ afterEach(async () => {
   await act(() => renderer?.unmount());
   vi.unstubAllGlobals();
 });
+function text(node: ReactTestInstance | string): string {
+  return typeof node === "string" ? node : node.children.map(text).join("");
+}
+
 const binding = {
   enabled: true,
   connectionId: "connection",
@@ -84,7 +89,7 @@ describe("Signal settings loading", () => {
         }),
     );
     await act(() => {
-      renderer = create(<SignalSettings />);
+      renderer = create(withI18n(<SignalSettings />));
     });
     expect(renderer!.root.findAllByType("input")).toHaveLength(0);
     await act(() => finish?.({ _tag: "Failure" }));
@@ -99,7 +104,7 @@ describe("Signal settings loading", () => {
     );
     const retry = renderer!.root
       .findAllByType("button")
-      .find((button) => button.props.children === "Retry loading")!;
+      .find((button) => text(button) === "Retry loading")!;
     await act(() => retry.props.onClick());
     expect(renderer!.root.findByProps({ "aria-label": "Signal skill arguments" }).props.value).toBe(
       "saved args",
@@ -113,7 +118,7 @@ describe("Signal settings loading", () => {
       }),
     );
     await act(() => {
-      renderer = create(<SignalSettings />);
+      renderer = create(withI18n(<SignalSettings />));
     });
     await act(() =>
       renderer!.root
@@ -121,10 +126,19 @@ describe("Signal settings loading", () => {
         .props.onChange({ target: { value: "unsaved args" } }),
     );
     state.prepared = { httpBaseUrl: "http://localhost" };
-    await act(() => renderer!.update(<SignalSettings />));
+    await act(() => renderer!.update(withI18n(<SignalSettings />)));
     expect(renderer!.root.findByProps({ "aria-label": "Signal skill arguments" }).props.value).toBe(
       "unsaved args",
     );
     expect(state.run.mock.calls.filter(([input]) => input.action === "get")).toHaveLength(1);
   });
 });
+
+// fork: these components now use upstream's translation hooks.
+initializeGT({ defaultLocale: "en", locales: ["en"] });
+
+const withI18n = (children: React.ReactNode) => (
+  <GTProvider locale="en" translations={{}}>
+    {children}
+  </GTProvider>
+);

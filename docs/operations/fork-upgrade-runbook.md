@@ -113,3 +113,21 @@ Agents, Signal and usage displays on upstream's layouts; keep sidebar usage aggr
 agent-awareness queries. Pin every patched dependency exactly
 before regenerating the lockfile. Stamp the four release manifests as 0.1.8 separately from the
 merge: the upstream tag still carries 0.1.7.
+
+## 0.1.11
+
+Use Node 26.13.1, matching upstream's engines. Keep upstream's background delegation,
+self-settlement and completion acknowledgement flow, including child-thread names in native wakes.
+Reapply fork admission under the same dispatch lock: queued or active completion deliveries keep
+heartbeat and Signal `start_if_idle` retryable as busy. Alias wakes retain their capped payload.
+Relative heartbeat wakeups remain independent of the cron reactor's active-thread set.
+
+Keep both credential capability sets and the upstream subagent bit when reusing credentials.
+Codex's direct delegation registration must honor the fork's delegation gate too. Register
+caller-bound fork tools with upstream's outside-client visibility annotation. Upstream migrations
+now reach 102 and run individually; fork migrations remain 1–5 in their separate ledger. A current
+fork ledger and migration-50 validation must allow upstream's read-only startup recheck.
+
+Adapt Agents, Signal and usage displays to upstream's translated settings layout. Add only English
+catalog entries for fork copy. Preserve exact patched-dependency override pins and regenerate the
+lockfile. Stamp the four release manifests as 0.1.11 separately: the upstream tag carries 0.1.10.

@@ -128,9 +128,19 @@ describe("childStateFromTaskStatus", () => {
   it("folds native task statuses into running, completed, error, and interrupted", () => {
     assert.deepEqual(
       (
-        ["queued", "running", "waiting", "completed", "failed", "cancelled", "interrupted"] as const
+        [
+          "queued",
+          "starting",
+          "running",
+          "waiting",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted",
+        ] as const
       ).map(childStateFromTaskStatus),
       [
+        { settled: false, state: "running" },
         { settled: false, state: "running" },
         { settled: false, state: "running" },
         { settled: false, state: "running" },

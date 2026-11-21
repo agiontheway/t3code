@@ -68,6 +68,7 @@ source alone does not explain. Most code changes do not need an internal documen
 ### Runbooks
 
 - [Development and local builds](./operations/development.md)
+- [Scenarios: real-app proof for a fix](./operations/scenarios.md)
 - [T3 Connect setup](./operations/connect-setup.md)
 - [Fork upgrade 0.0.45 → 0.1.0](./operations/fork-upgrade-runbook.md)
 - [Release](./operations/release.md)

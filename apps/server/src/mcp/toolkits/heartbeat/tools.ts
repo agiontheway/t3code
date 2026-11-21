@@ -15,7 +15,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 
 import { HeartbeatService } from "../../../heartbeat/HeartbeatService.ts";
 import * as DelegationGrants from "../../../orchestration-v2/fork/DelegationGrants.ts";
@@ -92,7 +92,9 @@ const HeartbeatCreateTool = Tool.make("t3_heartbeat_create", {
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotate(Tool.OpenWorld, false)
+  // fork: these tools act only as their local calling thread.
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const HeartbeatListTool = Tool.make("t3_heartbeat_list", {
   description:
@@ -106,7 +108,9 @@ const HeartbeatListTool = Tool.make("t3_heartbeat_list", {
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
-  .annotate(Tool.OpenWorld, false);
+  .annotate(Tool.OpenWorld, false)
+  // fork: these tools act only as their local calling thread.
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const HeartbeatDeleteTool = Tool.make("t3_heartbeat_delete", {
   description:
@@ -120,7 +124,9 @@ const HeartbeatDeleteTool = Tool.make("t3_heartbeat_delete", {
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, true)
   .annotate(Tool.Idempotent, true)
-  .annotate(Tool.OpenWorld, false);
+  .annotate(Tool.OpenWorld, false)
+  // fork: these tools act only as their local calling thread.
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 const HeartbeatWakeupTool = Tool.make("t3_heartbeat_wakeup", {
   description:
@@ -134,7 +140,9 @@ const HeartbeatWakeupTool = Tool.make("t3_heartbeat_wakeup", {
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, false)
-  .annotate(Tool.OpenWorld, false);
+  .annotate(Tool.OpenWorld, false)
+  // fork: these tools act only as their local calling thread.
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
 export const HeartbeatToolkit = Toolkit.make(
   HeartbeatCreateTool,

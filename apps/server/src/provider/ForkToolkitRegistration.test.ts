@@ -1,3 +1,8 @@
+import { ThreadIssueService } from "../orchestration-v2/ThreadIssueService.ts";
+import { PullRequestService } from "../pullRequest/PullRequestService.ts";
+import { IssueService } from "../issue/IssueService.ts";
+import { GitManager } from "../git/GitManager.ts";
+import { EnvironmentThemeService } from "../environmentTheme.ts";
 import { HeartbeatService } from "../heartbeat/HeartbeatService.ts";
 import { DelegationGrants } from "../orchestration-v2/fork/DelegationGrants.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -43,6 +48,11 @@ import { ProviderRegistry } from "./ProviderRegistry.ts";
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Layer.mock(ThreadIssueService)({}),
+  Layer.mock(PullRequestService)({}),
+  Layer.mock(IssueService)({}),
+  Layer.mock(GitManager)({}),
+  Layer.mock(EnvironmentThemeService)({}),
   Layer.mock(AssetSigner)({}),
   Layer.mock(DeviceService)({}),
   Layer.mock(DocumentText)({}),
