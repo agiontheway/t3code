@@ -59,7 +59,7 @@ Connect disabled. No private Clerk key or relay deployment credentials are neede
 
 The command produces the macOS arm64 installer under `release/`. For other desktop targets,
 use the [native build options](./docs/operations/development.md#desktop-artifacts). See
-[T3 Connect setup](./docs/operations/connect-setup.md) for the full configuration reference.
+[T3 Connect setup](./docs/operations/02_connect-setup.md) for the full configuration reference.
 
 
 <p align="center">

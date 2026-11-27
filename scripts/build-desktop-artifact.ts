@@ -3604,7 +3604,7 @@ export class DesktopConnectConfigMissingError extends Schema.TaggedError<Desktop
   { missingKeys: Schema.Array(Schema.String) },
 ) {
   override get message(): string {
-    return `Connect-enabled desktop build is missing public configuration: ${this.missingKeys.join(", ")}. Set it before rebuilding; see docs/operations/connect-setup.md.`;
+    return `Connect-enabled desktop build is missing public configuration: ${this.missingKeys.join(", ")}. Set it before rebuilding; see docs/operations/02_connect-setup.md.`;
   }
 }
 
