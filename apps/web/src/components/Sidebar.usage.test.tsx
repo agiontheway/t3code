@@ -9,14 +9,22 @@ import { makeThreadFixture } from "../test-fixtures";
 
 const state = vi.hoisted(() => ({ showTooltips: false }));
 
-// Same visibility seam as ThreadRelationshipsControl.agents.test.tsx: the real
-// popup content mounts only when tooltips are enabled, without a browser portal.
-vi.mock("./ui/tooltip", () => ({
-  Tooltip: ({ children }: { children: ReactNode }) => children,
-  TooltipTrigger: ({ render, children }: { render: ReactElement; children: ReactNode }) =>
-    cloneElement(render, {}, children),
-  TooltipPopup: ({ children }: { children: ReactNode }) =>
-    state.showTooltips ? <aside role="tooltip">{children}</aside> : null,
+// fork: mount the shared hover-card payload only while its tooltip is visible.
+vi.mock("./ui/shared-tooltip", () => ({
+  SharedTooltipTrigger: ({
+    render,
+    children,
+    label,
+  }: {
+    render: ReactElement;
+    children: ReactNode;
+    label: ReactNode;
+  }) => (
+    <>
+      {cloneElement(render, {}, children)}
+      {state.showTooltips ? <aside role="tooltip">{label}</aside> : null}
+    </>
+  ),
 }));
 vi.mock("../state/session", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../state/session")>()),
@@ -98,10 +106,8 @@ const rowProps: ComponentProps<typeof SidebarThreadRow> = {
   isRouteThread: false,
   readOpensPullRequestsInRightPanel: () => false,
   jumpLabel: null,
-  currentEnvironmentId: thread.environmentId,
   environmentLabel: "Environment",
   environmentMachine: "desktop",
-  scratchMachineLabel: null,
   project: null,
   projectDisplayName: "Project",
   providerEntryByInstanceId: new Map(providerEntries.map((entry) => [entry.instanceId, entry])),

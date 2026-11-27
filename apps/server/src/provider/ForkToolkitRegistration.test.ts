@@ -1,3 +1,9 @@
+// fork: registration uses upstream's workflow, feedback and tool-visibility services.
+import { Workflows } from "../workflows/Workflows.ts";
+import { TaskFolders } from "../workspace/TaskFolders.ts";
+import { FeedbackStore } from "../feedback/FeedbackStore.ts";
+import { AnalyticsService } from "../telemetry/AnalyticsService.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { ThreadIssueService } from "../orchestration-v2/ThreadIssueService.ts";
 import { PullRequestService } from "../pullRequest/PullRequestService.ts";
 import { IssueService } from "../issue/IssueService.ts";
@@ -48,6 +54,11 @@ import { ProviderRegistry } from "./ProviderRegistry.ts";
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
+  Layer.mock(Workflows)({}),
+  Layer.mock(TaskFolders)({}),
+  Layer.mock(FeedbackStore)({}),
+  Layer.mock(AnalyticsService)({}),
+  NodeSqliteClient.layer({ filename: ":memory:" }),
   Layer.mock(ThreadIssueService)({}),
   Layer.mock(PullRequestService)({}),
   Layer.mock(IssueService)({}),
