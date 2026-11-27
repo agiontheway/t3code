@@ -131,3 +131,19 @@ fork ledger and migration-50 validation must allow upstream's read-only startup 
 Adapt Agents, Signal and usage displays to upstream's translated settings layout. Add only English
 catalog entries for fork copy. Preserve exact patched-dependency override pins and regenerate the
 lockfile. Stamp the four release manifests as 0.1.11 separately: the upstream tag carries 0.1.10.
+
+## 0.1.13
+
+Keep upstream's independent child settlement (#43558): a finished child may settle once its
+parent holds its results, even while that parent stays active. Settlement does not cancel relative
+heartbeat wakeups; they remain independent of the cron active-thread set. Heartbeat and Signal
+`start_if_idle` still share dispatch admission with queued and active completion deliveries.
+
+Preserve upstream's background-wait capability alongside the fork capability set when issuing or
+reusing credentials. Keep linked-environment `delegate_task` upstream and `agent_*` local. The scanner
+now supplies the fork's symlink exclusion behavior upstream. Keep the Connect build note in the
+renamed `02_connect-setup.md`. Upstream migrations reach 119; fork migrations remain 1–5 separately.
+
+Use Node 26.13.1 and exact override pins for every patched dependency. Preserve the 62 fork English
+keys; upstream's i18n check also requires them in other locales, which this parity merge leaves
+untouched. Stamp the four release manifests as 0.1.13 separately: the tag carries 0.1.12.

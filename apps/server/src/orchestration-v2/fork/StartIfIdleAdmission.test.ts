@@ -154,17 +154,30 @@ const runStatuses = (threadId: ThreadId) =>
     return (yield* orchestrator.getThreadProjection(threadId)).runs.map((run) => run.status);
   });
 
-it.effect("an idle thread starts the message and the receipt replays it", () =>
+it.effect.each([false, true])("an idle thread starts and replays after settlement: %s", (settled) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const threadId = ThreadId.make("thread:start-if-idle:idle");
     yield* createThread(threadId);
+
+    if (settled) {
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("settle:start-if-idle:idle"),
+        threadId,
+      });
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.settledOverride,
+        "settled",
+      );
+    }
 
     const command = heartbeat(threadId, "idle");
     const started = yield* orchestrator.dispatch(command);
     assert.deepEqual(yield* runStatuses(threadId), ["starting"]);
     const projection = yield* orchestrator.getThreadProjection(threadId);
     assert.equal(projection.runs[0]?.userMessageId, command.messageId);
+    assert.isNull(projection.thread.settledOverride);
     assert.equal((yield* receiptFor(command.commandId))?.status, "accepted");
 
     const replayed = yield* orchestrator.dispatch(command);
