@@ -59,6 +59,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsecret-1-dev pkg-config imagemagick
 
+      # The Apple Speech helper needs the macOS 26 SDK (Xcode 26); upstream builds on macos-26 runners.
+      - name: Select Xcode 26
+        if: runner.os == 'macOS'
+        run: |
+          xcode="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)"
+          if [ -z "$xcode" ]; then echo "Xcode 26 is not installed on this runner" >&2; ls -d /Applications/Xcode*.app >&2; exit 1; fi
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcrun swiftc --version
+
       - name: Install dependencies
         run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
 
